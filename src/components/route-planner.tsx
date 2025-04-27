@@ -85,6 +85,7 @@ export function RoutePlanner() {
   const [showPhotoUpload, setShowPhotoUpload] = useState<Coordinates | null>(null)
   const [photoDescription, setPhotoDescription] = useState('')
   const [photoWaypointId, setPhotoWaypointId] = useState<string | null>(null) // Track which waypoint photo is being added to
+  const [savedRouteId, setSavedRouteId] = useState<string | null>(null); // Store the generated route ID after saving
 
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -308,6 +309,7 @@ export function RoutePlanner() {
     }
     // Also remove associated photos
     setPhotos(prev => prev.filter(p => p.waypointId !== id));
+     setSavedRouteId(null); // Clear saved ID if route changes
   };
 
   const handleMarkerClick = (id: string) => {
@@ -372,8 +374,8 @@ export function RoutePlanner() {
       // Don't close info window automatically, let user add description if they want.
       // Reset state for the next potential upload from the same window.
       setPhotoDescription('');
-      setPhotoWaypointId(null); // Clear linked waypoint ID after successful upload
-      setShowPhotoUpload(null); // Hide the description/upload button area in the InfoWindow temporarily? No, keep it open maybe.
+      // setPhotoWaypointId(null); // Clear linked waypoint ID after successful upload // Keep waypointId for info window context
+      // setShowPhotoUpload(null); // Hide the description/upload button area in the InfoWindow temporarily? No, keep it open maybe.
       setActiveMarker(activeMarker); // Keep the same marker active
 
 
@@ -399,6 +401,7 @@ export function RoutePlanner() {
       setActiveMarker(null);
     }
     toast({ title: "Photo Removed", description: "The photo has been removed from the route." });
+    setSavedRouteId(null); // Clear saved ID if route changes
   };
 
 
@@ -414,14 +417,12 @@ export function RoutePlanner() {
 
     setIsSaving(true);
     // --- In a real app: Save to Firebase Firestore ---
-    // 1. Connect to Firebase.
-    // 2. Create a new document in a 'routes' collection.
-    // 3. Store routeName, origin, destination, intermediateWaypoints (as GeoPoints or simple objects),
-    //    and photos (URLs, locations, descriptions, waypointId).
-    // 4. Generate a unique ID for the route.
+    // Generate a more predictable ID for mocking/testing
+    const generatedRouteId = `route-${Date.now().toString().slice(0, 10)}`; // Use first 10 digits of timestamp for consistency
+
 
     const routeData: StoredRouteData = {
-        id: `route-${Date.now()}`, // Placeholder ID
+        id: generatedRouteId, // Use generated ID
         name: routeName,
         origin,
         destination,
@@ -433,14 +434,16 @@ export function RoutePlanner() {
     console.log("Saving Route:", routeData); // Simulate saving
 
     // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
     setIsSaving(false);
+    setSavedRouteId(generatedRouteId); // Store the generated ID
+
     toast({
       title: "Route Saved!",
-      description: `Route "${routeName}" has been saved.`,
+      description: `Route "${routeName}" has been saved with ID: ${generatedRouteId}`,
       action: (
-         <Button variant="outline" size="sm" onClick={() => handleShareRoute(routeData.id)}>
+         <Button variant="outline" size="sm" onClick={() => handleShareRoute(generatedRouteId)}>
             <Share2 className="mr-2 h-4 w-4" /> Share
          </Button>
       )
@@ -448,12 +451,16 @@ export function RoutePlanner() {
     // --- End Simulation ---
   };
 
-   const handleShareRoute = (routeId: string) => {
+   const handleShareRoute = (routeId: string | null) => {
+     if (!routeId) {
+       toast({ title: "Save Route First", description: "Please save the route before sharing.", variant: "destructive" });
+       return;
+     }
      // In a real app, use the actual saved route ID from Firebase/backend
     const shareUrl = `${window.location.origin}/view/${routeId}`; // Example URL structure
     navigator.clipboard.writeText(shareUrl)
       .then(() => {
-        toast({ title: "Link Copied!", description: "Route sharing link copied to clipboard." });
+        toast({ title: "Link Copied!", description: `Sharing link for route ${routeId} copied.` });
       })
       .catch(err => {
         console.error('Failed to copy share link:', err);
@@ -496,9 +503,9 @@ export function RoutePlanner() {
         >
           <div className="p-2 min-w-[250px] max-w-xs space-y-3">
             <h4 className="text-md font-semibold flex items-center gap-2">
-               {isOrigin && <LocateFixed className="w-4 h-4 text-blue-600" />}
-               {isDestination && <Flag className="w-4 h-4 text-red-600" />}
-               {!isOrigin && !isDestination && <MapPin className="w-4 h-4 text-gray-600" />}
+               {isOrigin && <LocateFixed className="w-4 h-4 text-primary" />}
+               {isDestination && <Flag className="w-4 h-4 text-destructive" />}
+               {!isOrigin && !isDestination && <MapPin className="w-4 h-4 text-muted-foreground" />}
                {activeWaypoint.name || waypointType}
             </h4>
             {activeWaypoint.address && (
@@ -645,8 +652,12 @@ export function RoutePlanner() {
                          const isOrigin = origin?.id === waypoint.id;
                          const isDestination = destination?.id === waypoint.id;
                          const isIntermediate = !isOrigin && !isDestination;
-                         const pinColor = isOrigin ? '#3b82f6' : isDestination ? '#ef4444' : '#6b7280'; // Blue, Red, Gray
-                         const glyph = isOrigin ? <LocateFixed className="w-4 h-4 text-white"/> : isDestination ? <Flag className="w-4 h-4 text-white"/> : <span className="text-xs font-bold">{intermediateWaypoints.findIndex(wp => wp.id === waypoint.id) + 1}</span>;
+                         // Correctly find the index for intermediate waypoints
+                         const intermediateIndex = intermediateWaypoints.findIndex(wp => wp.id === waypoint.id);
+
+                         const pinColor = isOrigin ? 'hsl(var(--primary))' : isDestination ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground))'; // Use theme colors
+                         const glyph = isOrigin ? <LocateFixed className="w-4 h-4 text-primary-foreground"/> : isDestination ? <Flag className="w-4 h-4 text-destructive-foreground"/> : <span className="text-xs font-bold text-white">{intermediateIndex + 1}</span>;
+
 
                          return (
                             <AdvancedMarker
@@ -655,7 +666,7 @@ export function RoutePlanner() {
                             onClick={() => handleMarkerClick(waypoint.id)}
                             title={waypoint.name || `Waypoint ${index + 1}`} // Tooltip on hover
                             >
-                                <Pin background={pinColor} glyphColor={'#fff'} borderColor={'#fff'}>
+                                <Pin background={pinColor} glyphColor={'hsl(var(--primary-foreground))'} borderColor={'hsl(var(--primary-foreground))'}>
                                     {glyph}
                                 </Pin>
                             </AdvancedMarker>
@@ -705,13 +716,13 @@ export function RoutePlanner() {
           {/* Origin Input */}
           <div className="space-y-1">
             <Label htmlFor="originLocation" className="flex items-center gap-1">
-                <LocateFixed className="w-4 h-4 text-blue-600"/> Origin
+                <LocateFixed className="w-4 h-4 text-primary"/> Origin
             </Label>
             <Input
               id="originLocation"
               ref={originAutocompleteInputRef}
               placeholder="Search or click map for start point"
-              className="border-blue-300 focus:border-blue-500 focus:ring-blue-500"
+              className="border-blue-300 focus:border-primary focus:ring-primary"
             />
             {origin && (
                 <div className="text-xs text-muted-foreground p-1 flex justify-between items-center">
@@ -726,13 +737,13 @@ export function RoutePlanner() {
           {/* Destination Input */}
           <div className="space-y-1">
             <Label htmlFor="destinationLocation" className="flex items-center gap-1">
-                <Flag className="w-4 h-4 text-red-600"/> Destination
+                <Flag className="w-4 h-4 text-destructive"/> Destination
             </Label>
             <Input
               id="destinationLocation"
               ref={destinationAutocompleteInputRef}
               placeholder="Search or click map for end point"
-              className="border-red-300 focus:border-red-500 focus:ring-red-500"
+               className="border-red-300 focus:border-destructive focus:ring-destructive"
             />
              {destination && (
                 <div className="text-xs text-muted-foreground p-1 flex justify-between items-center">
@@ -747,14 +758,14 @@ export function RoutePlanner() {
           {/* Add Intermediate Waypoint */}
           <div className="space-y-1">
             <Label htmlFor="intermediateLocation" className="flex items-center gap-1">
-                <PlusCircle className="w-4 h-4 text-gray-600"/> Add Stop / Waypoint
+                <PlusCircle className="w-4 h-4 text-muted-foreground"/> Add Stop / Waypoint
             </Label>
             <Input
               id="intermediateLocation"
               ref={intermediateAutocompleteInputRef}
               placeholder="Search or click map for stops"
               disabled={intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS}
-              className="border-gray-300 focus:border-gray-500 focus:ring-gray-500"
+              className="border-gray-300 focus:border-muted-foreground focus:ring-muted-foreground"
             />
              {intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS && (
                 <p className="text-xs text-destructive">Maximum intermediate waypoints reached.</p>
@@ -769,7 +780,7 @@ export function RoutePlanner() {
                {intermediateWaypoints.map((wp, index) => (
                 <li key={wp.id} className="flex items-center justify-between p-2 bg-secondary/50 rounded-md text-sm">
                    <div className="flex items-center gap-2 overflow-hidden">
-                     <span className="flex-shrink-0 w-5 h-5 bg-gray-500 text-white rounded-full flex items-center justify-center text-xs font-bold">{index + 1}</span>
+                     <span className="flex-shrink-0 w-5 h-5 bg-muted-foreground text-background rounded-full flex items-center justify-center text-xs font-bold">{index + 1}</span>
                      <span className="truncate" title={wp.address || wp.name}>{wp.name}</span>
                   </div>
                    <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={() => removeWaypoint(wp.id)}>
@@ -786,8 +797,8 @@ export function RoutePlanner() {
              <Button onClick={handleSaveRoute} disabled={isSaving || !origin || !destination}>
                 {isSaving ? 'Saving...' : <><Save className="mr-2 h-4 w-4" /> Save Route</>}
              </Button>
-             {/* Share button might need the actual ID after saving, disable until saved or use placeholder */}
-             <Button variant="outline" onClick={() => handleShareRoute(`route-${Date.now()}`)} disabled={isSaving || !origin || !destination}>
+             {/* Share button now uses the savedRouteId state */}
+             <Button variant="outline" onClick={() => handleShareRoute(savedRouteId)} disabled={isSaving || !savedRouteId}>
                <Share2 className="mr-2 h-4 w-4" /> Share Route
              </Button>
           </div>
