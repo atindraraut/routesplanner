@@ -544,7 +544,7 @@ export function RoutePlanner() {
         } else {
             setIntermediateWaypoints(prev => prev.filter(wp => wp.id !== id));
         }
-
+ 
          if (activeMarker === id) {
             setActiveMarker(null); // Close InfoWindow if it was open for this marker
         }
