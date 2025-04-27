@@ -1,6 +1,8 @@
 
 'use client'
 
+import EXIF from 'exif-js';
+
 import type { Coordinates } from '@/types/maps'
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import {
@@ -48,8 +50,9 @@ interface Photo {
   id: string;
   url: string; // Base64 or remote URL
   location: Coordinates;
-  waypointId?: string; // Link photo to a waypoint (Origin, Dest, or Intermediate ID)
-  description?: string
+  waypointId?: string; // Link photo to a waypoint IF location is NOT from EXIF
+  description?: string;
+  locationSource: 'exif' | 'waypoint'; // Track where the location came from
 }
 
 // Keep RouteData simple for saving; origin/dest are just special waypoints
@@ -64,6 +67,25 @@ interface StoredRouteData {
   // It's often better to recalculate on load if needed.
   // directionsResultJson?: string; // Optional: Store stringified DirectionsResult
 }
+
+// --- Helper Function ---
+// Converts DMS (Degrees, Minutes, Seconds) from EXIF to DD (Decimal Degrees)
+function convertDMSToDD(dms: number[] | undefined, ref: string | undefined): number | null {
+    if (!dms || !ref || dms.length !== 3) return null;
+
+    const degrees = dms[0] || 0;
+    const minutes = dms[1] || 0;
+    const seconds = dms[2] || 0;
+
+    let dd = degrees + minutes / 60 + seconds / 3600;
+
+    // Adjust sign based on reference (N/S, E/W)
+    if (ref === 'S' || ref === 'W') {
+        dd = dd * -1;
+    }
+    return dd;
+}
+
 
 // --- Component ---
 export function RoutePlanner() {
@@ -82,9 +104,9 @@ export function RoutePlanner() {
   const [directionsRenderer, setDirectionsRenderer] = useState<google.maps.DirectionsRenderer | null>(null)
   const [directionsService, setDirectionsService] = useState<google.maps.DirectionsService | null>(null)
   const [isSaving, setIsSaving] = useState(false)
-  const [showPhotoUpload, setShowPhotoUpload] = useState<Coordinates | null>(null)
+  const [showPhotoUpload, setShowPhotoUpload] = useState<Coordinates | null>(null) // Where user clicked to add photo
   const [photoDescription, setPhotoDescription] = useState('')
-  const [photoWaypointId, setPhotoWaypointId] = useState<string | null>(null) // Track which waypoint photo is being added to
+  const [photoWaypointId, setPhotoWaypointId] = useState<string | null>(null) // Track which waypoint photo *dialog* was opened from
   const [savedRouteId, setSavedRouteId] = useState<string | null>(null); // Store the generated route ID after saving
 
 
@@ -287,7 +309,7 @@ export function RoutePlanner() {
          toast({ title: "Waypoint Added", description: "Intermediate point added by clicking the map." });
     }
 
-  }, [origin, destination, intermediateWaypoints, toast, handleSetOrigin, handleSetDestination, addIntermediateWaypoint]); // Added missing dependencies
+  }, [origin, destination, intermediateWaypoints.length, toast, handleSetOrigin, handleSetDestination, addIntermediateWaypoint]);
 
 
   const removeWaypoint = (id: string) => {
@@ -307,8 +329,8 @@ export function RoutePlanner() {
     if (activeMarker === id) {
       setActiveMarker(null);
     }
-    // Also remove associated photos
-    setPhotos(prev => prev.filter(p => p.waypointId !== id));
+    // Also remove associated photos that were explicitly linked to this waypoint
+    setPhotos(prev => prev.filter(p => p.waypointId !== id || p.locationSource === 'exif'));
      setSavedRouteId(null); // Clear saved ID if route changes
   };
 
@@ -336,8 +358,8 @@ export function RoutePlanner() {
         const waypoint = allWaypoints.find(wp => wp.id === waypointId);
 
         if (waypoint && fileInputRef.current) {
-          setShowPhotoUpload({ lat: waypoint.lat, lng: waypoint.lng });
-          setPhotoWaypointId(waypointId); // Link photo being uploaded to this waypoint
+          setShowPhotoUpload({ lat: waypoint.lat, lng: waypoint.lng }); // Store the waypoint's location as fallback
+          setPhotoWaypointId(waypointId); // Link photo *upload context* to this waypoint
           fileInputRef.current.click(); // Trigger file input immediately
         } else {
              toast({ title: "Error", description: "Could not find waypoint to add photo.", variant: "destructive" });
@@ -347,49 +369,75 @@ export function RoutePlanner() {
 
   const handlePhotoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!showPhotoUpload || !photoWaypointId || !event.target.files || event.target.files.length === 0) {
-        // If the context was lost (e.g., user closed InfoWindow before selecting file), show error
-        if (!showPhotoUpload || !photoWaypointId) {
-            toast({ title: "Upload Cancelled", description: "Waypoint context lost. Please click 'Add Photo' on the waypoint again.", variant: "destructive"});
-        }
-         // Reset file input if needed
-        if (event.target) event.target.value = '';
-        return;
+      if (!showPhotoUpload || !photoWaypointId) {
+        toast({ title: "Upload Cancelled", description: "Waypoint context lost. Please click 'Add Photo' on the waypoint again.", variant: "destructive" });
+      }
+      if (event.target) event.target.value = '';
+      return;
     }
-
 
     const file = event.target.files[0];
     const reader = new FileReader();
 
     reader.onloadend = () => {
-      const newPhoto: Photo = {
-        id: `photo-${Date.now()}`,
-        url: reader.result as string, // Base64 URL
-        location: showPhotoUpload, // Use the coordinates stored when 'Add Photo' was clicked
-        description: photoDescription,
-        waypointId: photoWaypointId // Assign waypoint ID
-      };
-      setPhotos(prev => [...prev, newPhoto]);
-      toast({ title: "Photo Added", description: "Your photo has been tagged to the waypoint." });
+      const imgElement = document.createElement('img');
+      imgElement.src = reader.result as string;
 
-      // Don't close info window automatically, let user add description if they want.
-      // Reset state for the next potential upload from the same window.
-      setPhotoDescription('');
-      // setPhotoWaypointId(null); // Clear linked waypoint ID after successful upload // Keep waypointId for info window context
-      // setShowPhotoUpload(null); // Hide the description/upload button area in the InfoWindow temporarily? No, keep it open maybe.
-      setActiveMarker(activeMarker); // Keep the same marker active
+      // Use exif-js to read metadata
+      EXIF.getData(imgElement as any, function() {
+        const latArr = EXIF.getTag(this, "GPSLatitude");
+        const lonArr = EXIF.getTag(this, "GPSLongitude");
+        const latRef = EXIF.getTag(this, "GPSLatitudeRef");
+        const lonRef = EXIF.getTag(this, "GPSLongitudeRef");
 
+        let photoLocation: Coordinates = showPhotoUpload!; // Fallback to waypoint location
+        let locationSource: Photo['locationSource'] = 'waypoint';
+        let linkedWaypointId: string | undefined = photoWaypointId ?? undefined; // Link to context waypoint if no EXIF
 
-       // Explicitly reset file input value here
-       if (fileInputRef.current) {
-         fileInputRef.current.value = '';
-       }
+        if (latArr && lonArr && latRef && lonRef) {
+          const lat = convertDMSToDD(latArr, latRef);
+          const lng = convertDMSToDD(lonArr, lonRef);
+
+          if (lat !== null && lng !== null) {
+            photoLocation = { lat, lng };
+            locationSource = 'exif';
+            linkedWaypointId = undefined; // Unlink from specific waypoint if EXIF is used
+            toast({ title: "Location Found!", description: "GPS coordinates extracted from photo metadata." });
+          } else {
+            toast({ title: "Location Warning", description: "Could not parse GPS data from photo. Using waypoint location.", variant: "default" });
+          }
+        } else {
+           toast({ title: "Location Info", description: "No GPS data found in photo metadata. Using waypoint location.", variant: "default" });
+        }
+
+        const newPhoto: Photo = {
+          id: `photo-${Date.now()}`,
+          url: reader.result as string, // Base64 URL
+          location: photoLocation,
+          description: photoDescription,
+          waypointId: linkedWaypointId, // Only set if locationSource is 'waypoint'
+          locationSource: locationSource,
+        };
+
+        setPhotos(prev => [...prev, newPhoto]);
+        toast({ title: "Photo Added", description: `Photo tagged with ${locationSource === 'exif' ? 'EXIF' : 'waypoint'} location.` });
+
+        // Reset state for the next potential upload from the same window.
+        setPhotoDescription('');
+        // Keep photoWaypointId and showPhotoUpload for the InfoWindow context
+        setActiveMarker(activeMarker); // Keep the same marker active
+
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+      });
     };
 
-     reader.onerror = () => {
-        toast({ title: "File Read Error", description: "Could not read the selected file.", variant: "destructive" });
-         if (fileInputRef.current) {
-           fileInputRef.current.value = '';
-         }
+    reader.onerror = () => {
+      toast({ title: "File Read Error", description: "Could not read the selected file.", variant: "destructive" });
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     };
 
     reader.readAsDataURL(file); // Read file as Base64
@@ -438,7 +486,7 @@ export function RoutePlanner() {
 
          toast({
           title: "Route Saved!",
-          description: `Route "${routeName}" saved locally.`,
+          description: `Route "${routeName}" saved locally. You can now add photos.`, // Updated toast message
           action: (
              <Button variant="outline" size="sm" onClick={() => handleShareRoute(generatedRouteId)}>
                 <Share2 className="mr-2 h-4 w-4" /> Share
@@ -552,7 +600,7 @@ export function RoutePlanner() {
               </AlertDialog>
             </div>
 
-             {/* Photo Upload UI (Only appears if waypointId matches this active waypoint) */}
+             {/* Photo Upload UI (Only appears if photoWaypointId matches this active waypoint) */}
              {photoWaypointId === activeWaypoint.id && (
                 <div className="mt-4 border-t pt-3 space-y-2">
                   <h5 className="text-sm font-medium">Add description for new photo:</h5>
@@ -560,9 +608,10 @@ export function RoutePlanner() {
                     placeholder="Description (optional)"
                     value={photoDescription}
                     onChange={(e) => setPhotoDescription(e.target.value)}
+                    rows={2} // Smaller text area
                   />
                   {/* Upload is triggered by handleAddPhotoClick, confirmation happens in handlePhotoUpload */}
-                   <p className="text-xs text-muted-foreground">Select a photo file to upload.</p>
+                   <p className="text-xs text-muted-foreground">Select a photo file to upload. Location will be extracted if available.</p>
                 </div>
               )}
 
@@ -572,9 +621,12 @@ export function RoutePlanner() {
     }
 
     if (activePhoto) {
-       const linkedWaypoint = [origin, destination, ...intermediateWaypoints]
-          .filter(Boolean)
-          .find(wp => wp?.id === activePhoto.waypointId);
+       // Find waypoint ONLY if the photo location came from the waypoint
+       const linkedWaypoint = activePhoto.locationSource === 'waypoint'
+          ? [origin, destination, ...intermediateWaypoints]
+             .filter(Boolean)
+             .find(wp => wp?.id === activePhoto.waypointId)
+          : null; // Don't show linked waypoint if location is from EXIF
 
        return (
         <InfoWindow
@@ -597,8 +649,12 @@ export function RoutePlanner() {
             {linkedWaypoint && (
                 <p className="text-xs text-muted-foreground">Linked to: {linkedWaypoint.name}</p>
             )}
-            <p className="text-xs text-muted-foreground mb-2">
-                Lat: {activePhoto.location.lat.toFixed(4)}, Lng: {activePhoto.location.lng.toFixed(4)}
+             <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                <MapPin className="w-3 h-3"/>
+                <span>Lat: {activePhoto.location.lat.toFixed(4)}, Lng: {activePhoto.location.lng.toFixed(4)}</span>
+                 <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${activePhoto.locationSource === 'exif' ? 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300'}`}>
+                    {activePhoto.locationSource.toUpperCase()}
+                </span>
              </p>
               <AlertDialog>
                   <AlertDialogTrigger asChild>
@@ -660,7 +716,6 @@ export function RoutePlanner() {
                     {getAllWaypoints().map((waypoint, index) => {
                          const isOrigin = origin?.id === waypoint.id;
                          const isDestination = destination?.id === waypoint.id;
-                         const isIntermediate = !isOrigin && !isDestination;
                          // Correctly find the index for intermediate waypoints
                          const intermediateIndex = intermediateWaypoints.findIndex(wp => wp.id === waypoint.id);
 
@@ -690,8 +745,9 @@ export function RoutePlanner() {
                         onClick={() => handleMarkerClick(photo.id)}
                         title={photo.description || "View Photo"}
                         >
-                        <div className="p-1 bg-accent rounded-full shadow-md cursor-pointer transform hover:scale-110 transition-transform">
-                            <Camera className="w-4 h-4 text-accent-foreground" />
+                         {/* Style marker based on location source */}
+                        <div className={`p-1 rounded-full shadow-md cursor-pointer transform hover:scale-110 transition-transform ${photo.locationSource === 'exif' ? 'bg-green-500' : 'bg-accent'}`}>
+                            <Camera className="w-4 h-4 text-white" />
                         </div>
                         </AdvancedMarker>
                     ))}
@@ -708,7 +764,7 @@ export function RoutePlanner() {
       <Card className="h-full flex flex-col">
         <CardHeader>
           <CardTitle>Plan Your Route</CardTitle>
-           <CardDescription>Set origin, destination, and add stops.</CardDescription>
+           <CardDescription>Set origin, destination, and add stops. Save the route to add photos.</CardDescription> {/* Updated description */}
         </CardHeader>
         <CardContent className="flex-grow flex flex-col gap-4 overflow-y-auto p-4">
           {/* Route Name */}
@@ -825,4 +881,3 @@ export function RoutePlanner() {
     </div>
   );
 }
-
