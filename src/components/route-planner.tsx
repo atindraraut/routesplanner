@@ -1,10 +1,10 @@
-'use client';
+'use client'
 
-import type { Coordinates } from '@/types/maps';
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import type { Coordinates } from '@/types/maps'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Map,
-  useMap,
+    useMap,
   useMapsLibrary,
   AdvancedMarker,
   Pin,
@@ -28,18 +28,18 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
-} from "@/components/ui/alert-dialog"
+} from '@/components/ui/alert-dialog'
 
 
 // --- Constants ---
-const DEFAULT_CENTER: Coordinates = { lat: 37.7749, lng: -122.4194 }; // San Francisco
-const DEFAULT_ZOOM = 12;
-const MAX_WAYPOINTS = 10; // Limit number of waypoints for performance/API usage
+const DEFAULT_CENTER: Coordinates = { lat: 37.7749, lng: -122.4194 } // San Francisco
+const DEFAULT_ZOOM = 12
+const MAX_WAYPOINTS = 10 // Limit number of waypoints for performance/API usage
 
 // --- Interfaces ---
 interface Waypoint extends Coordinates {
-  id: string;
-  name?: string; // Optional name for the waypoint
+  id: string
+  name?: string // Optional name for the waypoint
 }
 
 interface Photo {
@@ -47,34 +47,34 @@ interface Photo {
   url: string;
   location: Coordinates;
   waypointId?: string; // Link photo to a waypoint
-  description?: string;
+  description?: string
 }
 
 interface RouteData {
   id: string;
   name: string;
   waypoints: Waypoint[];
-  photos: Photo[];
-  directions?: google.maps.DirectionsResult | null;
+    photos: Photo[]
+    directions?: google.maps.DirectionsResult | null
 }
 
 // --- Component ---
 export function RoutePlanner() {
-  const map = useMap();
-  const mapsLib = useMapsLibrary('routes');
-  const placesLib = useMapsLibrary('places');
-  const { toast } = useToast();
+  const map = useMap()
+  const mapsLib = useMapsLibrary('routes')
+  const placesLib = useMapsLibrary('places')
+  const { toast } = useToast()
 
-  const [routeName, setRouteName] = useState<string>('My Awesome Route');
-  const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
-  const [photos, setPhotos] = useState<Photo[]>([]);
-  const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
-  const [activeMarker, setActiveMarker] = useState<string | null>(null); // Waypoint or Photo ID
-  const [directionsRenderer, setDirectionsRenderer] = useState<google.maps.DirectionsRenderer | null>(null);
-  const [directionsService, setDirectionsService] = useState<google.maps.DirectionsService | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const [showPhotoUpload, setShowPhotoUpload] = useState<Coordinates | null>(null);
-  const [photoDescription, setPhotoDescription] = useState('');
+  const [routeName, setRouteName] = useState<string>('My Awesome Route')
+  const [waypoints, setWaypoints] = useState<Waypoint[]>([])
+  const [photos, setPhotos] = useState<Photo[]>([])
+  const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null)
+  const [activeMarker, setActiveMarker] = useState<string | null>(null) // Waypoint or Photo ID
+  const [directionsRenderer, setDirectionsRenderer] = useState<google.maps.DirectionsRenderer | null>(null)
+  const [directionsService, setDirectionsService] = useState<google.maps.DirectionsService | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+  const [showPhotoUpload, setShowPhotoUpload] = useState<Coordinates | null>(null)
+  const [photoDescription, setPhotoDescription] = useState('')
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autocompleteInputRef = useRef<HTMLInputElement>(null);
@@ -84,14 +84,14 @@ export function RoutePlanner() {
   // --- Effects ---
 
   // Initialize Directions Service and Renderer
-  useEffect(() => {
-    if (!mapsLib || !map) return;
-    setDirectionsService(new mapsLib.DirectionsService());
-    setDirectionsRenderer(new mapsLib.DirectionsRenderer({ map, suppressMarkers: true })); // Suppress default markers
-  }, [mapsLib, map]);
+    useEffect(() => {
+        if (!mapsLib || !map) return;
+        setDirectionsService(new mapsLib.DirectionsService());
+        setDirectionsRenderer(new mapsLib.DirectionsRenderer({ map, suppressMarkers: true })); // Suppress default markers
+    }, [mapsLib, map]);
 
   // Initialize Places Autocomplete
-  useEffect(() => {
+    useEffect(() => {
     if (!placesLib || !autocompleteInputRef.current || autocomplete) return;
 
     const options = {
@@ -125,7 +125,7 @@ export function RoutePlanner() {
 
   // Update directions when waypoints change
   useEffect(() => {
-    if (!directionsService || !directionsRenderer || waypoints.length < 2) {
+    if (!directionsService || !directionsRenderer || waypoints.length < 2) {  
       directionsRenderer?.setDirections(null); // Clear route if fewer than 2 waypoints
       setDirections(null);
       return;
@@ -162,7 +162,7 @@ export function RoutePlanner() {
   // --- Handlers ---
 
   const handleMapClick = useCallback((event: google.maps.MapMouseEvent) => {
-    if (!event.latLng) return;
+    if (!event.latLng) return
     if (waypoints.length >= MAX_WAYPOINTS) {
       toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_WAYPOINTS} waypoints.`, variant: "destructive" });
       return;
@@ -212,7 +212,7 @@ export function RoutePlanner() {
 
   const handleUploadClick = (waypointId: string) => {
      const waypoint = waypoints.find(wp => wp.id === waypointId);
-      if (waypoint && fileInputRef.current) {
+        if (waypoint && fileInputRef.current) {
         setShowPhotoUpload({ lat: waypoint.lat, lng: waypoint.lng }); // Keep upload UI open
         fileInputRef.current.click(); // Trigger file input
       }
@@ -279,7 +279,7 @@ export function RoutePlanner() {
         photos,
         directions, // Optional: store calculated directions
     };
-
+        
     console.log("Saving Route:", routeData); // Simulate saving
 
     // Simulate API call delay
@@ -313,7 +313,7 @@ export function RoutePlanner() {
 
    const renderActiveMarkerInfo = () => {
     const activeWaypoint = waypoints.find(wp => wp.id === activeMarker);
-    const activePhoto = photos.find(p => p.id === activeMarker);
+       const activePhoto = photos.find(p => p.id === activeMarker);
 
     if (activeWaypoint) {
       return (
@@ -398,7 +398,7 @@ export function RoutePlanner() {
              {activePhoto.description && <p className="text-sm mb-2">{activePhoto.description}</p>}
             <p className="text-xs text-muted-foreground mb-2">
                 Lat: {activePhoto.location.lat.toFixed(4)}, Lng: {activePhoto.location.lng.toFixed(4)}
-            </p>
+             </p>
               <AlertDialog>
                   <AlertDialogTrigger asChild>
                     <Button size="sm" variant="destructive">
@@ -432,13 +432,13 @@ export function RoutePlanner() {
   // --- Render ---
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 h-[calc(100vh-10rem)]"> {/* Adjust height as needed */}
-      {/* Map Area */}
-      <div className="md:col-span-2 h-full rounded-lg overflow-hidden shadow-md">
-        <Map
-          mapId={'route_snap_map'} // Optional: For cloud-based map styling
-          defaultCenter={DEFAULT_CENTER}
-          defaultZoom={DEFAULT_ZOOM}
-          gestureHandling={'greedy'}
+            {/* Map Area */}
+            <div className="md:col-span-2 h-full rounded-lg overflow-hidden shadow-md">
+                <Map
+                    mapId={'route_snap_map'} // Optional: For cloud-based map styling
+                    defaultCenter={DEFAULT_CENTER}
+                    defaultZoom={DEFAULT_ZOOM}
+                    gestureHandling={'greedy'}
           disableDefaultUI={true}
           onClick={handleMapClick}
           className="w-full h-full"
@@ -507,7 +507,7 @@ export function RoutePlanner() {
              <p className="text-xs text-muted-foreground">Click on the map or search to add waypoints.</p>
             {waypoints.length === 0 && <p className="text-sm text-muted-foreground text-center py-4">No waypoints added yet.</p>}
             <ul className="space-y-2">
-              {waypoints.map((wp, index) => (
+               {waypoints.map((wp, index) => (
                 <li key={wp.id} className="flex items-center justify-between p-2 bg-secondary/30 rounded-md text-sm">
                    <div className="flex items-center gap-2 overflow-hidden">
                      <span className="flex-shrink-0 w-5 h-5 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-xs font-bold">{index + 1}</span>
