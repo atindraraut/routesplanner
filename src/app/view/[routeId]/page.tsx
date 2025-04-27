@@ -10,7 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Skeleton } from '@/components/ui/skeleton';
 import Image from 'next/image';
 import { Camera, MapPin, LocateFixed, Flag } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+// Removed Button import as it's not used here anymore
 import { useToast } from '@/hooks/use-toast'; // Import useToast
 
 
@@ -24,14 +24,14 @@ interface Waypoint extends Coordinates {
 // Interface matching the one in route-planner.tsx
 interface Photo {
   id: string;
-  url: string;
+  url: string; // URL from cloud storage
   location: Coordinates;
   waypointId?: string; // Only present if locationSource is 'waypoint'
   description?: string;
   locationSource: 'exif' | 'waypoint'; // Track where the location came from
 }
 
-// Matches the structure used in RoutePlanner for saving/fetching
+// Matches the structure expected from the backend API/database
 interface StoredRouteData {
   id: string;
   name: string;
@@ -39,64 +39,53 @@ interface StoredRouteData {
   destination: Waypoint;
   intermediateWaypoints: Waypoint[];
   photos: Photo[];
+  creatorId?: string; // Optional for now
   // directionsResultJson?: string; // Optional
 }
 
-// --- Mock Fetch Function (Replace with actual Firebase fetch) ---
+// --- Fetch Function (Now fetches from API) ---
 async function fetchRouteData(routeId: string): Promise<StoredRouteData | null> {
-  console.log(`Fetching route data for ID: ${routeId}`);
-  // Simulate API delay
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  console.log(`Fetching route data for ID: ${routeId} from API`);
+  try {
+      const response = await fetch(`/api/routes/${routeId}`); // Use API route
 
-  // Try to retrieve the route data saved in localStorage by the planner
-  const storedRouteJson = localStorage.getItem(`route_${routeId}`);
-  if (storedRouteJson) {
-    try {
-        const storedRoute: StoredRouteData = JSON.parse(storedRouteJson);
-        // Basic validation to ensure it has the required structure
-        if (storedRoute && storedRoute.id === routeId && storedRoute.origin && storedRoute.destination) {
-            console.log(`Found and loaded route ${routeId} from localStorage.`);
-            // Ensure photos array has locationSource (for older saved routes)
-             storedRoute.photos = storedRoute.photos.map(p => ({
-                ...p,
-                locationSource: p.locationSource || 'waypoint' // Default to 'waypoint' if missing
-            }));
-            return storedRoute;
-        } else {
-             console.warn(`Route data in localStorage for ${routeId} is invalid.`);
-             localStorage.removeItem(`route_${routeId}`); // Clean up invalid data
-        }
-    } catch (e) {
-        console.error(`Error parsing route data from localStorage for ${routeId}:`, e);
-        localStorage.removeItem(`route_${routeId}`); // Clean up corrupted data
-    }
-  }
+      if (response.status === 404) {
+           console.warn(`Route ${routeId} not found via API.`);
+           return null;
+      }
 
-  // Fallback to mock data if not found in localStorage (useful for testing without planning first)
-  console.warn(`Route ${routeId} not found in localStorage. Falling back to mock data.`);
-  if (routeId && routeId.startsWith('route-')) {
-     console.log(`Recognized route ID pattern for ${routeId}, returning mock data.`);
-     // Return the first mock route as a default for testing shared links
-     return {
-        id: routeId, // Use the actual ID passed in
-        name: "SF Short Tour (Mock)", // Indicate it's mock
-        origin: { id: 'wp-origin-mock1', lat: 37.7793, lng: -122.4194, name: 'San Francisco City Hall', address: '1 Dr Carlton B Goodlett Pl, San Francisco, CA 94102' },
-        destination: { id: 'wp-dest-mock1', lat: 37.7588, lng: -122.5134, name: 'Ocean Beach', address: 'Great Hwy, San Francisco, CA 94121' },
-        intermediateWaypoints: [
-          { id: 'wp-inter-mock1-1', lat: 37.8087, lng: -122.4098, name: 'Pier 39', address: 'Pier 39, San Francisco, CA 94133' },
-        ],
-        photos: [
-          { id: 'ph-mock1-1', url: 'https://picsum.photos/seed/pier39/300/200', location: { lat: 37.8087, lng: -122.4098 }, waypointId: 'wp-inter-mock1-1', description: 'Sea Lions at Pier 39', locationSource: 'waypoint' },
-          { id: 'ph-mock1-2', url: 'https://picsum.photos/seed/oceanbeach2/300/200', location: { lat: 37.7588, lng: -122.5134 }, waypointId: 'wp-dest-mock1', description: 'Sunset at Ocean Beach', locationSource: 'waypoint' },
-          { id: 'ph-mock1-3', url: 'https://picsum.photos/seed/exifloc/300/200', location: { lat: 37.7954, lng: -122.4024 }, description: 'Downtown from Coit Tower (EXIF)', locationSource: 'exif' }, // Mock EXIF photo
-        ],
-      };
+      if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.message || `API error! status: ${response.status}`);
+      }
+
+      const routeData: StoredRouteData = await response.json();
+      console.log(`Successfully fetched route ${routeId} from API.`);
+
+      // Basic validation (optional, API should ideally return valid data)
+      if (!routeData || !routeData.id || !routeData.origin || !routeData.destination) {
+            console.error("Fetched route data is incomplete:", routeData);
+            throw new Error("Fetched route data is incomplete.");
+      }
+
+       // Ensure photos array has locationSource (for data consistency if needed)
+      routeData.photos = routeData.photos.map(p => ({
+        ...p,
+        locationSource: p.locationSource || 'waypoint' // Default if missing
+      }));
+
+      return routeData;
+
+  } catch (error: any) {
+      console.error(`Error fetching route data for ${routeId} from API:`, error);
+      // Optionally, you could try falling back to localStorage here if desired,
+      // but generally, the API should be the source of truth.
+      // const storedRouteJson = localStorage.getItem(`route_${routeId}`);
+      // ... (localStorage fallback logic if needed) ...
+
+      // If no fallback or fallback fails:
+      return null; // Indicate failure to fetch
   }
-   else {
-    console.warn(`Mock route not found for ID: ${routeId}`);
-    return null; // Route not found
-  }
-  // --- End Mock Data ---
 }
 
 
@@ -223,7 +212,7 @@ function ViewRouteMap({ routeData }: { routeData: StoredRouteData }) {
         );
     // Key dependencies are the services, the route data, and the renderer.
     // Avoid depending directly on 'map' if possible, unless its identity changes.
-    }, [directionsService, directionsRenderer, routeData, toast]);
+    }, [directionsService, directionsRenderer, routeData, toast, map]); // Added map back as directionsRenderer depends on it implicitly
 
 
     // --- Render ---
@@ -276,6 +265,7 @@ export default function ViewRoutePage() {
   const [error, setError] = useState<string | null>(null);
   const [mapCenter, setMapCenter] = useState<Coordinates>({ lat: 37.7749, lng: -122.4194 }); // Default SF
   const [mapKey, setMapKey] = useState<string>(`map-${Date.now()}`); // Force map re-render on route change
+  const { toast } = useToast(); // Get toast function
 
 
   useEffect(() => {
@@ -293,34 +283,38 @@ export default function ViewRoutePage() {
 
     fetchRouteData(routeId)
       .then(data => {
-        console.log("Fetched data:", data);
+        console.log("Fetched data via API:", data);
         if (data) {
-          // Validate required fields
-          if (!data.origin || !data.destination) {
-             console.error('Route data is incomplete:', data);
-             setError('Route data is incomplete (missing origin or destination).');
-             setRouteData(null);
-          } else {
-              setRouteData(data);
-              // Set initial map center based on origin
-              setMapCenter({ lat: data.origin.lat, lng: data.origin.lng });
-              console.log("Route data set successfully:", data);
-          }
+          // Basic validation moved within fetchRouteData or assumed correct from API
+           setRouteData(data);
+           // Set initial map center based on origin
+           setMapCenter({ lat: data.origin.lat, lng: data.origin.lng });
+           console.log("Route data set successfully:", data);
         } else {
           console.warn(`Route not found for ID: ${routeId}`);
-          setError('Route not found. Please check the link or save the route first.'); // Updated error message
+          setError(`Route not found. Please check the link. (ID: ${routeId})`);
           setRouteData(null);
+          toast({ // Add toast notification for route not found
+              title: "Route Not Found",
+              description: `Could not find a route with the ID ${routeId}.`,
+              variant: "destructive",
+          });
         }
       })
       .catch(err => {
         console.error("Error fetching route:", err);
-        setError('Failed to load route data due to a network or server error.');
+        setError(`Failed to load route data. ${err.message || 'Please try again later.'}`);
          setRouteData(null);
+         toast({ // Add toast notification for fetch error
+              title: "Loading Error",
+              description: `Failed to load route data: ${err.message || 'Network or server error.'}`,
+              variant: "destructive",
+          });
       })
       .finally(() => {
         setLoading(false);
       });
-  }, [routeId]); // Re-run only when routeId changes
+  }, [routeId, toast]); // Re-run only when routeId changes, added toast dependency
 
   // --- Combine waypoints for the list display ---
    const allWaypointsForList = useMemo(() => {
@@ -379,7 +373,7 @@ export default function ViewRoutePage() {
 
   if (!routeData) {
     // This state might occur if fetch completed but data was null/invalid without setting error explicitly
-    return <div className="container mx-auto p-4 text-center text-muted-foreground">Route data could not be displayed. Ensure the route was saved correctly.</div>;
+    return <div className="container mx-auto p-4 text-center text-muted-foreground">Route data could not be displayed. Please ensure the link is correct.</div>;
   }
 
   return (
@@ -479,13 +473,19 @@ export default function ViewRoutePage() {
                        return (
                            <div key={photo.id} className="group relative overflow-hidden rounded-md shadow border border-border aspect-video">
                                 <Image
-                                    src={photo.url}
+                                    src={photo.url} // Use the URL from DB/Cloud Storage
                                     alt={altText}
                                     fill // Use fill layout for aspect ratio control
                                     sizes="(max-width: 640px) 50vw, (max-width: 768px) 33vw, 50vw" // Optimize image loading
                                     style={{ objectFit: 'cover' }} // Cover the area
                                     className="transition-transform duration-300 ease-in-out group-hover:scale-105"
                                     title={altText} // Add title attribute for tooltip on hover
+                                    // Consider adding error handling for image loading
+                                    onError={(e) => {
+                                        console.error(`Error loading image: ${photo.url}`);
+                                        // Optionally replace src with a placeholder
+                                        // e.currentTarget.src = '/placeholder-image.png';
+                                    }}
                                 />
                                 {/* Location Source Badge */}
                                 <span className={`absolute top-1 right-1 text-[10px] font-semibold px-1.5 py-0.5 rounded shadow ${photo.locationSource === 'exif' ? 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300'}`}>
@@ -511,4 +511,3 @@ export default function ViewRoutePage() {
     </div>
   );
 }
-

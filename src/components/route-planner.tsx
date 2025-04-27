@@ -35,6 +35,77 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 
+// --- API Actions ---
+// We'll define server actions for database operations in separate files later
+// For now, let's define placeholder functions that would call these actions.
+
+// Placeholder for a server action to save the route
+async function saveRouteAction(routeData: StoredRouteData): Promise<{ success: boolean; routeId?: string; error?: string }> {
+    // This would typically be in `src/actions/saveRoute.ts`
+    console.log("Calling saveRouteAction (placeholder)", routeData);
+    // In a real implementation:
+    // 1. Connect to DB: await dbConnect();
+    // 2. Create or Update Route: const route = new Route(routeData); await route.save();
+    // 3. Handle errors
+    // 4. Return success/failure and ID
+    try {
+      // Simulate saving to a backend (replace with actual API call/server action)
+      const response = await fetch('/api/routes', { // Example API endpoint
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(routeData),
+      });
+
+      if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log("saveRouteAction response:", result);
+      return { success: true, routeId: result.id };
+
+    } catch (error: any) {
+        console.error("Error in saveRouteAction:", error);
+        return { success: false, error: error.message || "Failed to save route." };
+    }
+}
+
+// Placeholder for a server action to upload a photo and get its URL
+// In a real app, this would upload to cloud storage (like Firebase Storage or S3)
+// and return the public URL. It might also update the Route document directly
+// or return info needed to update it on the client.
+async function uploadPhotoAction(fileDataUrl: string, routeId: string, photoInfo: Omit<Photo, 'url' | 'id'>): Promise<{ success: boolean; photoId?: string; photoUrl?: string; error?: string }> {
+    console.log(`Calling uploadPhotoAction for route ${routeId} (placeholder)`);
+    // 1. Decode base64 data URL
+    // 2. Upload image buffer to cloud storage (e.g., Firebase Storage, S3)
+    // 3. Get the public URL of the uploaded image
+    // 4. Optionally: Update the corresponding Route document in MongoDB to add the photo metadata
+    // 5. Return success, the new photo's ID (maybe generated on server), and the URL
+
+    try {
+         // Simulate backend upload and URL generation
+         const response = await fetch('/api/photos/upload', { // Example API endpoint
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ routeId, photoDataUrl: fileDataUrl, ...photoInfo }),
+         });
+
+         if (!response.ok) {
+             const errorData = await response.json();
+             throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
+         }
+
+         const result = await response.json();
+         console.log("uploadPhotoAction response:", result);
+         return { success: true, photoId: result.photoId, photoUrl: result.photoUrl };
+
+    } catch (error: any) {
+         console.error("Error in uploadPhotoAction:", error);
+         return { success: false, error: error.message || "Failed to upload photo." };
+    }
+}
+
 
 // --- Constants ---
 const DEFAULT_CENTER: Coordinates = { lat: 37.7749, lng: -122.4194 } // San Francisco
@@ -49,25 +120,24 @@ interface Waypoint extends Coordinates {
 }
 
 interface Photo {
-  id: string;
-  url: string; // Base64 data URI
+  id: string; // Unique ID for the photo (can be generated client or server side)
+  url: string; // URL pointing to the image (e.g., cloud storage URL)
   location: Coordinates;
   waypointId?: string; // Link photo to a waypoint IF location is NOT from EXIF
   description?: string;
   locationSource: 'exif' | 'waypoint'; // Track where the location came from
 }
 
-// Keep RouteData simple for saving; origin/dest are just special waypoints
+// Data structure for saving/fetching from the backend
 interface StoredRouteData {
-  id: string;
+  id: string; // Unique ID for the route
   name: string;
   origin: Waypoint;
   destination: Waypoint;
   intermediateWaypoints: Waypoint[];
-  photos: Photo[];
-  // Storing full directions result might be large and prone to becoming outdated.
-  // It's often better to recalculate on load if needed.
-  // directionsResultJson?: string; // Optional: Store stringified DirectionsResult
+  photos: Photo[]; // Store photo metadata, not base64 data
+  creatorId?: string; // Add creator ID (will be needed for auth)
+  // directionsResultJson?: string; // Optional: Store stringified DirectionsResult (less ideal)
 }
 
 // --- Helper Function ---
@@ -97,71 +167,62 @@ function convertDMSToDD(dms: number[] | undefined, ref: string | undefined): num
 const extractLocationFromPhoto = (file: File): Promise<Coordinates> => {
     console.log("extractLocationFromPhoto: Starting extraction for file:", file.name, "Size:", file.size);
     return new Promise((resolve, reject) => {
+        // Read the file initially to pass to EXIF.js
         const reader = new FileReader();
 
         reader.onload = (loadEvent) => {
-            const dataUrl = loadEvent.target?.result as string;
-            if (!dataUrl) {
-                console.error("extractLocationFromPhoto: FileReader failed to produce a result.");
-                return reject("Could not read the selected file.");
-            }
-             console.log("extractLocationFromPhoto: File read successfully as data URL (length:", dataUrl.length, "). Creating image element...");
+             // Use the ArrayBuffer result for EXIF.js
+             const buffer = loadEvent.target?.result as ArrayBuffer;
+             if (!buffer) {
+                  console.error("extractLocationFromPhoto: FileReader failed to produce ArrayBuffer.");
+                  return reject("Could not read the selected file.");
+             }
+             console.log("extractLocationFromPhoto: File read successfully as ArrayBuffer (size:", buffer.byteLength, ")");
 
-            const img = document.createElement('img');
-            // Handle potential large images causing issues
-             img.onerror = () => {
-                console.error("extractLocationFromPhoto: Error loading image element (possibly too large or invalid format).");
-                reject("Error loading image for EXIF extraction.");
-             };
+             try {
+                // exif-js expects the image data buffer
+                EXIF.getData(buffer as any, function () { // `this` context is important here
+                    console.log("extractLocationFromPhoto: EXIF.getData callback executed.");
+                    const allMetaData = EXIF.getAllTags(this);
+                     // console.debug("extractLocationFromPhoto: All EXIF MetaData:", allMetaData);
 
-            img.onload = () => {
-                 console.log("extractLocationFromPhoto: Image loaded. Calling EXIF.getData...");
-                 try {
-                    // exif-js modifies the 'this' context, hence the function() syntax
-                    EXIF.getData(img as any, function () {
-                        console.log("extractLocationFromPhoto: EXIF.getData callback executed.");
-                        const allMetaData = EXIF.getAllTags(this);
-                        console.debug("extractLocationFromPhoto: All EXIF MetaData:", allMetaData);
+                    const latArr = EXIF.getTag(this, "GPSLatitude") as GPSLatitude | undefined;
+                    const lonArr = EXIF.getTag(this, "GPSLongitude") as GPSLongitude | undefined;
+                    const latRef = EXIF.getTag(this, "GPSLatitudeRef") as string | undefined;
+                    const lonRef = EXIF.getTag(this, "GPSLongitudeRef") as string | undefined;
 
-                        const latArr = EXIF.getTag(this, "GPSLatitude") as GPSLatitude | undefined;
-                        const lonArr = EXIF.getTag(this, "GPSLongitude") as GPSLongitude | undefined;
-                        const latRef = EXIF.getTag(this, "GPSLatitudeRef") as string | undefined;
-                        const lonRef = EXIF.getTag(this, "GPSLongitudeRef") as string | undefined;
+                    console.debug("extractLocationFromPhoto: Extracted GPS Tags - latArr:", latArr, "lonArr:", lonArr, "latRef:", latRef, "lonRef:", lonRef);
 
-                        console.debug("extractLocationFromPhoto: Extracted GPS Tags - latArr:", latArr, "lonArr:", lonArr, "latRef:", latRef, "lonRef:", lonRef);
+                    if (latArr && lonArr && latRef && lonRef) {
+                        const lat = convertDMSToDD(latArr, latRef);
+                        const lng = convertDMSToDD(lonArr, lonRef);
+                        console.log("extractLocationFromPhoto: Converted coordinates - lat:", lat, "lng:", lng);
 
-                        if (latArr && lonArr && latRef && lonRef) {
-                            const lat = convertDMSToDD(latArr, latRef);
-                            const lng = convertDMSToDD(lonArr, lonRef);
-                            console.log("extractLocationFromPhoto: Converted coordinates - lat:", lat, "lng:", lng);
-
-                            if (lat !== null && lng !== null && !isNaN(lat) && !isNaN(lng)) {
-                                console.log(`extractLocationFromPhoto: Successfully extracted location for ${file.name}:`, { lat, lng });
-                                resolve({ lat, lng });
-                            } else {
-                                console.warn(`extractLocationFromPhoto: Could not parse valid GPS data from photo ${file.name}. Conversion resulted in invalid numbers.`);
-                                reject(`Could not parse valid GPS data from photo ${file.name}.`);
-                            }
+                        if (lat !== null && lng !== null && !isNaN(lat) && !isNaN(lng)) {
+                            console.log(`extractLocationFromPhoto: Successfully extracted location for ${file.name}:`, { lat, lng });
+                            resolve({ lat, lng });
                         } else {
-                             console.warn(`extractLocationFromPhoto: No complete GPS data found in photo ${file.name} metadata.`);
-                            reject(`No complete GPS data found in photo ${file.name} metadata.`);
+                            console.warn(`extractLocationFromPhoto: Could not parse valid GPS data from photo ${file.name}. Conversion resulted in invalid numbers.`);
+                            reject(`Could not parse valid GPS data from photo ${file.name}.`);
                         }
-                    });
-                } catch (exifError) {
-                     console.error(`extractLocationFromPhoto: Error during EXIF.getData for ${file.name}:`, exifError);
-                     reject(`Error processing EXIF data for ${file.name}.`);
-                }
-            };
-             img.src = dataUrl; // Set src AFTER onload/onerror are attached
+                    } else {
+                         console.warn(`extractLocationFromPhoto: No complete GPS data found in photo ${file.name} metadata.`);
+                        reject(`No complete GPS data found in photo ${file.name} metadata.`);
+                    }
+                });
+             } catch (exifError) {
+                  console.error(`extractLocationFromPhoto: Error during EXIF.getData for ${file.name}:`, exifError);
+                  reject(`Error processing EXIF data for ${file.name}.`);
+             }
         };
 
-        reader.onerror = (errorEvent) => {
-          console.error("extractLocationFromPhoto: FileReader error:", errorEvent.target?.error);
-          reject("Could not read the selected file: " + errorEvent.target?.error?.message);
-        };
+         reader.onerror = (errorEvent) => {
+             console.error("extractLocationFromPhoto: FileReader error:", errorEvent.target?.error);
+             reject("Could not read the selected file: " + errorEvent.target?.error?.message);
+         };
 
-         // Start reading the file as a Data URL (needed for exif-js)
-        reader.readAsDataURL(file);
+         // Read as ArrayBuffer for EXIF.js
+         reader.readAsArrayBuffer(file);
     });
 }
 
@@ -177,9 +238,9 @@ export function RoutePlanner() {
   const [origin, setOrigin] = useState<Waypoint | null>(null)
   const [destination, setDestination] = useState<Waypoint | null>(null)
   const [intermediateWaypoints, setIntermediateWaypoints] = useState<Waypoint[]>([])
-  const [photos, setPhotos] = useState<Photo[]>([])
+  const [photos, setPhotos] = useState<Photo[]>([]) // Store photo metadata (URL, location, etc.)
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null)
-  const [activeMarker, setActiveMarker] = useState<string | null>(null) // Waypoint ID (Origin, Dest, or Intermediate) or Photo ID
+  const [activeMarker, setActiveMarker] = useState<string | null>(null) // Waypoint ID or Photo ID
   const [directionsRenderer, setDirectionsRenderer] = useState<google.maps.DirectionsRenderer | null>(null)
   const [directionsService, setDirectionsService] = useState<google.maps.DirectionsService | null>(null)
   const [isSaving, setIsSaving] = useState(false)
@@ -261,7 +322,7 @@ export function RoutePlanner() {
 
          setter(ac); // Set the autocomplete instance in state
          return ac; // Return the instance
-      }, [placesLib, toast]); // Removed specific handlers from dependencies
+      }, [placesLib, toast]);
 
 
       // Initialize All Autocompletes
@@ -281,6 +342,7 @@ export function RoutePlanner() {
                     originAutocompleteInputRef.current.value = place.formatted_address; // Update input field
                 }
                 setActiveMarker(newOrigin.id);
+                setSavedRouteId(null); // Route changed, invalidate saved ID
             }
         };
 
@@ -293,6 +355,7 @@ export function RoutePlanner() {
                     destinationAutocompleteInputRef.current.value = place.formatted_address; // Update input field
                 }
                 setActiveMarker(newDest.id);
+                setSavedRouteId(null); // Route changed
              }
         };
 
@@ -311,6 +374,7 @@ export function RoutePlanner() {
            setIntermediateWaypoints(prev => [...prev, newWaypoint]);
            setActiveMarker(newWaypoint.id); // Make the new marker active
            map?.panTo({ lat, lng });
+           setSavedRouteId(null); // Route changed
          };
 
 
@@ -331,15 +395,14 @@ export function RoutePlanner() {
         return () => {
           console.log("useEffect Cleanup: Removing autocomplete listeners...");
           [acOrigin, acDest, acInter].forEach(ac => {
-             if (ac && window.google && window.google.maps) {
-                // Check if the listener reference exists before trying to remove
-                if ((ac as any)._placeChangedListener) {
+             if (ac && window.google && window.google.maps && (ac as any)._placeChangedListener) {
+                try {
                     window.google.maps.event.removeListener((ac as any)._placeChangedListener);
-                     console.log("Removed place_changed listener for:", (ac as any)?.gm_accessors_?.place?.Mb?.gm_accessors_?.input?.forwarding?.id || 'unknown AC');
+                    console.log("Removed place_changed listener for:", (ac as any)?.gm_accessors_?.place?.Mb?.gm_accessors_?.input?.forwarding?.id || 'unknown AC');
+                    window.google.maps.event.clearInstanceListeners(ac); // Clear any other listeners too
+                } catch (e) {
+                     console.warn("Error removing autocomplete listener:", e);
                 }
-                 // More robust cleanup: clear all instance listeners if specific removal fails
-                 window.google.maps.event.clearInstanceListeners(ac);
-                 console.log("Cleared all instance listeners for:", (ac as any)?.gm_accessors_?.place?.Mb?.gm_accessors_?.input?.forwarding?.id || 'unknown AC');
              }
           });
            // Also reset the state variables
@@ -423,11 +486,8 @@ export function RoutePlanner() {
         };
     }
 
-    // These handlers are now defined inside the component or wrapped in useCallback
-    // If wrapped in useCallback, ensure dependencies are correct (like map, toast)
-    // (See stable handlers defined in the initializeAutocomplete useEffect)
-
-    const handleSetOrigin = (place: google.maps.places.PlaceResult) => {
+    // Handlers need to be stable (defined outside or useCallback) if used in dependencies
+    const handleSetOrigin = useCallback((place: google.maps.places.PlaceResult) => {
          const newOrigin = createWaypoint(place);
          if (newOrigin) {
             setOrigin(newOrigin);
@@ -436,10 +496,11 @@ export function RoutePlanner() {
                 originAutocompleteInputRef.current.value = place.formatted_address;
             }
             setActiveMarker(newOrigin.id);
+            setSavedRouteId(null); // Route changed
          }
-    };
+    }, [map]); // Add map to dependency if used
 
-     const handleSetDestination = (place: google.maps.places.PlaceResult) => {
+     const handleSetDestination = useCallback((place: google.maps.places.PlaceResult) => {
          const newDest = createWaypoint(place);
          if (newDest) {
             setDestination(newDest);
@@ -448,11 +509,11 @@ export function RoutePlanner() {
                  destinationAutocompleteInputRef.current.value = place.formatted_address;
              }
             setActiveMarker(newDest.id);
+            setSavedRouteId(null); // Route changed
          }
-     };
+     }, [map]); // Add map dependency
 
-
-     const addIntermediateWaypoint = (lat: number, lng: number, name?: string, address?: string) => {
+     const addIntermediateWaypoint = useCallback((lat: number, lng: number, name?: string, address?: string) => {
        if (intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS) {
          toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_INTERMEDIATE_WAYPOINTS} intermediate waypoints.`, variant: "destructive" });
          return;
@@ -467,7 +528,8 @@ export function RoutePlanner() {
        setIntermediateWaypoints(prev => [...prev, newWaypoint]);
        setActiveMarker(newWaypoint.id); // Make the new marker active
        map?.panTo({ lat, lng });
-     };
+       setSavedRouteId(null); // Route changed
+     }, [intermediateWaypoints.length, toast, map]); // Add dependencies
 
 
     // Handles map clicks to set origin, destination, or intermediate points
@@ -524,7 +586,12 @@ export function RoutePlanner() {
             };
              if (!origin) handleSetOrigin(placeResultSimulated);
              else if (!destination) handleSetDestination(placeResultSimulated);
-             else addIntermediateWaypoint(lat, lng, "Added Waypoint", `Coordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+             // Ensure addIntermediateWaypoint is defined or passed correctly if placesLib is missing
+             else if (typeof addIntermediateWaypoint === 'function') {
+                 addIntermediateWaypoint(lat, lng, "Added Waypoint", `Coordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+             } else {
+                 console.error("addIntermediateWaypoint function not available in fallback.");
+             }
         }
 
     }, [origin, destination, intermediateWaypoints.length, toast, placesLib, handleSetOrigin, handleSetDestination, addIntermediateWaypoint]); // Dependencies
@@ -544,7 +611,7 @@ export function RoutePlanner() {
         } else {
             setIntermediateWaypoints(prev => prev.filter(wp => wp.id !== id));
         }
- 
+
          if (activeMarker === id) {
             setActiveMarker(null); // Close InfoWindow if it was open for this marker
         }
@@ -554,6 +621,8 @@ export function RoutePlanner() {
         if (photosToRemove.length > 0) {
              setPhotos(prev => prev.filter(p => !photosToRemove.includes(p.id)));
              console.log(`Removed ${photosToRemove.length} photos linked to waypoint ${id}`);
+             // TODO: Add API call to remove photos from backend storage and DB if needed
+             // removePhotosAction(routeId, photosToRemove);
         }
 
          toast({ title: `${removedType} Removed` });
@@ -582,6 +651,10 @@ export function RoutePlanner() {
 
     // Initiates the photo upload process when "Add Photo" is clicked in a waypoint's InfoWindow
     const handleAddPhotoClickFromWaypoint = (waypoint: Waypoint) => {
+        if (!savedRouteId) {
+            toast({title: "Save Route First", description: "Please save the route before adding photos.", variant: "default"});
+            return;
+        }
         if (waypoint && fileInputRef.current) {
             console.log("handleAddPhotoClickFromWaypoint: Triggering file input for waypoint:", waypoint.id);
              // Set context for potential fallback location
@@ -598,23 +671,27 @@ export function RoutePlanner() {
      // Handles the file selection from the <input type="file">
     const handlePhotoFilesSelected = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
-        if (!files || files.length === 0) {
-            // User cancelled the dialog
-            setPhotoUploadWaypointContext(null); // Clear context if no file selected
+        if (!files || files.length === 0 || !savedRouteId) {
+             if (!savedRouteId) {
+                 toast({ title: "Save Route First", description: "Please save the route before uploading photos.", variant: "default" });
+             }
+            setPhotoUploadWaypointContext(null); // Clear context if no file selected or route not saved
             return;
         }
 
-        setIsUploadingPhotos(true); // Show loading indicator
-        toast({ title: "Processing Photos...", description: `Attempting to process ${files.length} photo(s).` });
+        setIsUploadingPhotos(true);
+        toast({ title: "Processing Photos...", description: `Attempting to upload ${files.length} photo(s). This may take a moment.` });
 
         const fileArray = Array.from(files);
-        const newPhotosPromises = fileArray.map(async (file): Promise<Photo | null> => {
-            const photoId = `photo-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-            let photoLocation: Coordinates | null = null;
-            let locationSource: 'exif' | 'waypoint' = 'waypoint'; // Default if EXIF fails or not present
+        let photosAddedCount = 0;
+        let photosFailedCount = 0;
 
-            // 1. Read file as Data URL (needed for display and exif-js)
-            let dataUrl: string;
+        for (const file of fileArray) {
+            let photoLocation: Coordinates | null = null;
+            let locationSource: 'exif' | 'waypoint' = 'waypoint'; // Default
+            let dataUrl: string; // For sending to backend
+
+            // 1. Read file as Data URL to send to backend
             try {
                 dataUrl = await new Promise<string>((resolve, reject) => {
                     const reader = new FileReader();
@@ -622,88 +699,130 @@ export function RoutePlanner() {
                     reader.onerror = (e) => reject("Failed to read file: " + e.target?.error?.message);
                     reader.readAsDataURL(file);
                 });
-                 console.log(`handlePhotoFilesSelected: Read ${file.name} as data URL.`);
+                console.log(`handlePhotoFilesSelected: Read ${file.name} as data URL.`);
             } catch (readError) {
                 console.error(`handlePhotoFilesSelected: Error reading file ${file.name}:`, readError);
                 toast({ title: "Upload Error", description: `Could not read file ${file.name}.`, variant: "destructive" });
-                return null; // Skip this file
+                photosFailedCount++;
+                continue; // Skip this file
             }
 
-
-             // 2. Try to extract EXIF location
+            // 2. Try to extract EXIF location (client-side check before upload)
             try {
                 photoLocation = await extractLocationFromPhoto(file);
                 locationSource = 'exif';
                 console.log(`handlePhotoFilesSelected: EXIF location found for ${file.name}:`, photoLocation);
-                 toast({ title: "EXIF Location Found", description: `Using location data from ${file.name}.`, variant: "default" });
             } catch (exifError: any) {
                 console.warn(`handlePhotoFilesSelected: Could not extract EXIF location from ${file.name}:`, exifError);
-                // Use waypoint location ONLY if the upload was initiated from a waypoint context
                 if (photoUploadWaypointContext) {
                     photoLocation = photoUploadWaypointContext.location;
                     locationSource = 'waypoint';
-                     console.log(`handlePhotoFilesSelected: Falling back to waypoint location for ${file.name}:`, photoLocation);
-                     toast({ title: "Using Waypoint Location", description: `No location data in ${file.name}. Using waypoint location.`, variant: "default" });
+                    console.log(`handlePhotoFilesSelected: Falling back to waypoint location for ${file.name}:`, photoLocation);
                 } else {
-                     console.error(`handlePhotoFilesSelected: No EXIF data and no waypoint context for ${file.name}. Cannot determine location.`);
-                     toast({ title: "Location Missing", description: `Could not determine location for ${file.name}. Photo not added.`, variant: "destructive" });
-                     return null; // Cannot add photo without location
+                    console.error(`handlePhotoFilesSelected: No EXIF data and no waypoint context for ${file.name}. Cannot determine location.`);
+                    toast({ title: "Location Missing", description: `Could not determine location for ${file.name}. Photo not added.`, variant: "destructive" });
+                     photosFailedCount++;
+                    continue; // Skip this file
                 }
             }
 
-
-            // 3. Create Photo object if location was determined
-            if (photoLocation) {
-                 return {
-                    id: photoId,
-                    url: dataUrl, // Store the data URL
-                    location: photoLocation!,
-                    description: photoDescription || '', // Use description entered in info window if available
-                     // Link to waypoint only if locationSource is 'waypoint'
+            // 3. Prepare photo info (excluding URL and final ID)
+             if (photoLocation) {
+                const photoInfo: Omit<Photo, 'url' | 'id'> = {
+                    location: photoLocation,
+                    description: photoDescription || '',
                     waypointId: locationSource === 'waypoint' ? photoUploadWaypointContext?.id : undefined,
                     locationSource: locationSource,
                 };
-            } else {
-                 return null; // Should not happen if logic above is correct, but safeguard
-            }
+
+                 // 4. Call the backend action to upload and save metadata
+                 try {
+                     const result = await uploadPhotoAction(dataUrl, savedRouteId, photoInfo);
+                     if (result.success && result.photoId && result.photoUrl) {
+                        // Add the *confirmed* photo metadata (with URL from backend) to local state
+                         setPhotos((prev) => [...prev, {
+                             id: result.photoId!,
+                             url: result.photoUrl!,
+                             ...photoInfo
+                         }]);
+                         photosAddedCount++;
+                     } else {
+                         throw new Error(result.error || "Unknown upload error");
+                     }
+                 } catch (uploadError: any) {
+                     console.error(`Failed to upload photo ${file.name}:`, uploadError);
+                     toast({ title: "Upload Failed", description: `Could not upload ${file.name}. ${uploadError.message}`, variant: "destructive" });
+                     photosFailedCount++;
+                 }
+
+             } else {
+                 // Should not happen if logic above is correct, but safeguard
+                 console.error(`Location could not be determined for ${file.name}, skipping.`);
+                 photosFailedCount++;
+             }
+        } // End of loop through files
+
+
+        // Final Toast Notification
+        let finalToastTitle = "Photo Upload Complete";
+        let finalToastDesc = "";
+        let finalToastVariant: "default" | "success" | "destructive" = "default";
+
+        if (photosAddedCount > 0 && photosFailedCount === 0) {
+            finalToastDesc = `${photosAddedCount} photo(s) uploaded successfully.`;
+            finalToastVariant = "success";
+        } else if (photosAddedCount > 0 && photosFailedCount > 0) {
+             finalToastDesc = `${photosAddedCount} photo(s) uploaded, ${photosFailedCount} failed.`;
+             finalToastVariant = "default"; // Or maybe warning?
+        } else if (photosAddedCount === 0 && photosFailedCount > 0) {
+             finalToastTitle = "Photo Upload Failed";
+             finalToastDesc = `All ${photosFailedCount} photo(s) failed to upload.`;
+             finalToastVariant = "destructive";
+        } else {
+            // No files processed? Should not happen normally.
+             finalToastTitle = "No Photos Processed";
+             finalToastDesc = "No photos were selected or processed.";
+        }
+
+        toast({
+            title: finalToastTitle,
+            description: finalToastDesc,
+            variant: finalToastVariant
         });
 
 
-        // Wait for all file processing attempts
-        const results = await Promise.all(newPhotosPromises);
-        const successfulPhotos = results.filter((p): p is Photo => p !== null);
-
-        if (successfulPhotos.length > 0) {
-            setPhotos((prev) => [...prev, ...successfulPhotos]);
-            console.log(`handlePhotoFilesSelected: Added ${successfulPhotos.length} new photos.`);
-             toast({ title: "Photos Added", description: `${successfulPhotos.length} photo(s) added to the route.`, variant: "success" }); // Use a success variant if available
-        }
-
-        // Clean up after processing all files
+        // Clean up
         setIsUploadingPhotos(false);
-        setPhotoUploadWaypointContext(null); // Always clear context after processing
-        setPhotoDescription(''); // Clear description field
+        setPhotoUploadWaypointContext(null);
+        setPhotoDescription('');
         if (fileInputRef.current) {
             fileInputRef.current.value = ''; // Reset file input
         }
-         // Keep the last active marker's info window open if needed, or close it
-         // setActiveMarker(activeMarker); // Re-setting might close/reopen, maybe just leave it
 
-    }, [toast, photoUploadWaypointContext, photoDescription]); // Dependencies
+    }, [toast, savedRouteId, photoUploadWaypointContext, photoDescription]); // Dependencies
 
 
-    // Removes a specific photo
+    // Removes a specific photo (from state and potentially backend)
     const removePhoto = (id: string) => {
+        const photoToRemove = photos.find(p => p.id === id);
+        if (!photoToRemove) return;
+
         setPhotos(prev => prev.filter(p => p.id !== id));
         if (activeMarker === id) {
             setActiveMarker(null); // Close info window if it was for this photo
         }
-        toast({ title: "Photo Removed", description: "The photo has been removed from the route." });
-        setSavedRouteId(null); // Clear saved ID if route changes
+
+        // TODO: Add call to a server action to delete the photo from cloud storage
+        // and remove its reference from the Route document in MongoDB.
+        // Example: removePhotoAction(savedRouteId, id);
+
+        toast({ title: "Photo Removed", description: "The photo has been removed locally. Ensure it's also deleted from storage if needed." });
+        // Don't clear savedRouteId just for removing a photo, but the route *has* changed
+        setSavedRouteId(null); // Indicate route needs saving again after photo removal
     };
 
 
-    // Saves the current route to localStorage
+    // Saves the current route to MongoDB via server action
     const handleSaveRoute = async () => {
         if (!routeName.trim()) {
             toast({ title: "Invalid Name", description: "Please enter a name for your route.", variant: "destructive" });
@@ -715,50 +834,49 @@ export function RoutePlanner() {
         }
 
         setIsSaving(true);
-         // Generate a simple ID for local saving
-        const generatedRouteId = `route-${Date.now().toString().slice(-6)}`; // Use last 6 digits of timestamp
-        console.log("handleSaveRoute: generatedRouteId created:", generatedRouteId);
-
+        // Use existing savedRouteId if available (for updates), otherwise generate a new one
+        const routeIdToSave = savedRouteId || `route-${Date.now().toString().slice(-6)}-${Math.random().toString(16).slice(2, 6)}`;
 
         const routeData: StoredRouteData = {
-            id: generatedRouteId,
+            id: routeIdToSave, // Use generated or existing ID
             name: routeName,
             origin: origin!,
             destination: destination!,
             intermediateWaypoints,
-            photos, // Include photos in the saved data
+            photos, // Send current photo metadata
+             creatorId: 'temp_user_id' // Replace with actual user ID from auth context
         };
 
         try {
-             // Attempt to save to localStorage
-            localStorage.setItem(`route_${generatedRouteId}`, JSON.stringify(routeData));
-            console.log("handleSaveRoute: Route saved to local storage with ID:", generatedRouteId);
-            console.log("Route Saved to localStorage:", routeData);
-            setSavedRouteId(generatedRouteId); // Store the generated ID
+             // Call the server action (or API endpoint)
+             const result = await saveRouteAction(routeData);
 
-            toast({
-                title: "Route Saved!",
-                description: `Route "${routeName}" saved locally.`,
-                action: (
-                    <Button variant="outline" size="sm" onClick={() => handleShareRoute(generatedRouteId)}>
-                        <Share2 className="mr-2 h-4 w-4" /> Share
-                    </Button>
-                )
-            });
+             if (result.success && result.routeId) {
+                console.log("handleSaveRoute: Route saved/updated successfully with ID:", result.routeId);
+                setSavedRouteId(result.routeId); // Update state with the confirmed ID
+
+                toast({
+                    title: "Route Saved!",
+                    description: `Route "${routeName}" saved successfully.`,
+                    variant: "success",
+                    action: (
+                        <Button variant="outline" size="sm" onClick={() => handleShareRoute(result.routeId!)}>
+                            <Share2 className="mr-2 h-4 w-4" /> Share
+                        </Button>
+                    )
+                });
+             } else {
+                 throw new Error(result.error || "Failed to save route");
+             }
 
         } catch (error: any) {
-            console.error("handleSaveRoute: Error saving route to localStorage:", error);
-            console.error("Error saving route to localStorage:", error);
-             let description = "Could not save the route locally.";
-             if (error.name === 'QuotaExceededError') {
-                 description = "Could not save route. Local storage quota exceeded. Try removing old routes or photos.";
-             }
+            console.error("handleSaveRoute: Error saving route:", error);
             toast({
                 title: "Save Failed",
-                description: description,
+                description: error.message || "Could not save the route. Please try again.",
                 variant: "destructive"
             });
-            setSavedRouteId(null); // Clear ID on failure
+             // Don't clear savedRouteId on failure if it was an update attempt
         } finally {
             setIsSaving(false);
         }
@@ -770,7 +888,7 @@ export function RoutePlanner() {
         console.log("handleShareRoute: Received routeId:", routeId);
         if (!routeId) {
             console.warn("handleShareRoute: routeId is null. Cannot share.");
-            toast({ title: "Save Route First", description: "Please save the route before sharing.", variant: "destructive" });
+            toast({ title: "Save Route First", description: "Please save the route before sharing.", variant: "default" });
             return;
         }
         // Construct the URL based on the current window location and the saved route ID
@@ -781,17 +899,19 @@ export function RoutePlanner() {
          if (!navigator.clipboard) {
             console.error("handleShareRoute: Clipboard API not supported in this browser.");
             toast({ title: "Copy Failed", description: "Your browser does not support the clipboard API.", variant: "destructive" });
+            // Fallback: show the link in an alert or the toast
+            toast({ title: "Share Link", description: `Copy this link: ${shareUrl}`, variant: "default", duration: 10000 });
             return;
         }
          navigator.clipboard.writeText(shareUrl)
             .then(() => {
-                toast({ title: "Link Copied!", description: `Sharing link copied to clipboard.` });
+                toast({ title: "Link Copied!", description: `Sharing link copied to clipboard.`, variant: "success"});
             })
             .catch(err => {
                 console.error('handleShareRoute: Failed to copy share link:', err.message, err);
                 toast({ title: "Copy Failed", description: "Could not copy the link automatically. Please copy it manually.", variant: "destructive" });
                  // Optionally show the link in the toast description or an alert
-                 alert(`Share this link: ${shareUrl}`);
+                 toast({ title: "Share Link", description: `Copy this link: ${shareUrl}`, variant: "default", duration: 10000 });
             });
     };
 
@@ -855,7 +975,8 @@ export function RoutePlanner() {
                                 size="sm"
                                 variant="outline"
                                 onClick={() => handleAddPhotoClickFromWaypoint(activeWaypoint)}
-                                disabled={isUploadingPhotos} // Disable while processing
+                                disabled={isUploadingPhotos || !savedRouteId} // Disable if uploading or route not saved yet
+                                title={!savedRouteId ? "Save the route first" : "Add photo near this point"}
                             >
                                 {isUploadingPhotos && photoUploadWaypointContext?.id === activeWaypoint.id ? (
                                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
@@ -876,7 +997,7 @@ export function RoutePlanner() {
                                     <AlertDialogHeader>
                                         <AlertDialogTitle>Remove {waypointType}?</AlertDialogTitle>
                                         <AlertDialogDescription>
-                                            Are you sure you want to remove this {waypointType.toLowerCase()}? Photos linked directly to this waypoint (not from EXIF) will also be removed. This action cannot be undone.
+                                            Are you sure you want to remove this {waypointType.toLowerCase()}? Photos linked directly to this waypoint (not from EXIF) will also be removed. This action may require saving the route again.
                                         </AlertDialogDescription>
                                     </AlertDialogHeader>
                                     <AlertDialogFooter>
@@ -937,7 +1058,7 @@ export function RoutePlanner() {
                          {/* Image Preview */}
                         {activePhoto.url && (
                             <Image
-                                src={activePhoto.url}
+                                src={activePhoto.url} // Use the URL from cloud storage
                                 alt={activePhoto.description || 'Route photo'}
                                 width={200} // Fixed width for consistency
                                 height={150} // Fixed height
@@ -974,7 +1095,7 @@ export function RoutePlanner() {
                                 <AlertDialogHeader>
                                     <AlertDialogTitle>Remove Photo?</AlertDialogTitle>
                                     <AlertDialogDescription>
-                                        Are you sure you want to remove this photo? This action cannot be undone.
+                                        Are you sure you want to remove this photo? This will delete it from the route and potentially from storage. This action cannot be undone.
                                     </AlertDialogDescription>
                                 </AlertDialogHeader>
                                 <AlertDialogFooter>
@@ -1011,7 +1132,7 @@ export function RoutePlanner() {
             {/* Map Area */}
             <div className="md:col-span-2 h-full rounded-lg overflow-hidden shadow-md border border-border">
                 <Map
-                    mapId={'route_snap_map_planner_v3'} // More specific ID
+                    mapId={'route_snap_map_planner_v4'} // Update map ID if needed
                     defaultCenter={DEFAULT_CENTER}
                     defaultZoom={DEFAULT_ZOOM}
                     gestureHandling={'greedy'}
@@ -1076,10 +1197,7 @@ export function RoutePlanner() {
                     ))}
 
                     {/* Active Marker InfoWindow */}
-                    {/* Renders content based on activeMarker state (waypoint or photo) */}
                     {renderActiveMarkerInfo()}
-
-                    {/* DirectionsRenderer handles drawing the route line - managed by useEffect */}
 
                 </Map>
             </div>
@@ -1088,7 +1206,7 @@ export function RoutePlanner() {
       <Card className="h-full flex flex-col">
         <CardHeader>
           <CardTitle>Plan Your Route</CardTitle>
-           <CardDescription>Set origin, destination, add stops, and upload photos.</CardDescription>
+           <CardDescription>Set points, add stops, save, and upload photos.</CardDescription>
         </CardHeader>
         <CardContent className="flex-grow flex flex-col gap-4 overflow-y-auto p-4"> {/* Make content scrollable */}
           {/* Route Name */}
@@ -1097,7 +1215,7 @@ export function RoutePlanner() {
             <Input
               id="routeName"
               value={routeName}
-              onChange={(e) => setRouteName(e.target.value)}
+              onChange={(e) => { setRouteName(e.target.value); setSavedRouteId(null); }} // Invalidate saved ID on name change
               placeholder="e.g., Scenic Coastal Drive"
             />
           </div>
@@ -1188,9 +1306,13 @@ export function RoutePlanner() {
             </ul>
           </div>
 
-            {/* Upload Photos Section */}
+            {/* Upload Photos Section - Enabled only after saving */}
             <div className="space-y-1 border-t pt-4">
-                 <Label htmlFor="photoUploadTrigger" className="flex items-center gap-1 cursor-pointer hover:text-primary transition-colors">
+                 <Label
+                    htmlFor="photoUploadTrigger"
+                    className={`flex items-center gap-1 transition-colors ${!savedRouteId ? 'text-muted-foreground cursor-not-allowed' : 'cursor-pointer hover:text-primary'}`}
+                    title={!savedRouteId ? "Save the route first to enable photo uploads" : "Upload photos for this route"}
+                  >
                     <Upload className="w-4 h-4"/> Upload Photos
                  </Label>
                   {/* Hidden actual file input */}
@@ -1202,6 +1324,7 @@ export function RoutePlanner() {
                      accept="image/jpeg, image/png, image/gif" // Specify accepted types
                      style={{ display: 'none' }} // Keep it hidden
                      multiple // Allow selecting multiple photos
+                     disabled={!savedRouteId || isUploadingPhotos} // Disable if not saved or uploading
                  />
                   {/* Button that *looks* like the uploader, triggers the hidden input */}
                   <Button
@@ -1210,7 +1333,8 @@ export function RoutePlanner() {
                     size="sm"
                     className="w-full justify-start text-muted-foreground"
                     onClick={() => fileInputRef.current?.click()} // Click the hidden input
-                    disabled={isUploadingPhotos} // Disable while uploads are in progress
+                    disabled={!savedRouteId || isUploadingPhotos} // Disable while uploads are in progress or not saved
+                    title={!savedRouteId ? "Save the route first to enable photo uploads" : "Select photos"}
                     >
                        {isUploadingPhotos ? (
                             <>
@@ -1222,20 +1346,23 @@ export function RoutePlanner() {
                             </>
                         )}
                   </Button>
-                 <p className="text-xs text-muted-foreground mt-1">EXIF location data will be used if available.</p>
-                 {/* Display uploaded photos preview (optional, can get complex) */}
+                 <p className="text-xs text-muted-foreground mt-1">
+                    {savedRouteId ? "EXIF location data will be used if available." : "Save route to upload photos."}
+                 </p>
+                 {/* Display uploaded photos preview */}
                  {photos.length > 0 && (
                      <div className="mt-2 space-y-1">
                         <Label className="text-xs">Added Photos ({photos.length})</Label>
                         <div className="grid grid-cols-4 gap-2 max-h-24 overflow-y-auto p-1 border rounded-md">
                             {photos.map(p => (
                                 <div key={p.id} className="relative aspect-square group">
-                                    <Image src={p.url} alt={p.description || `Photo ${p.id.slice(-4)}`} fill className="object-cover rounded" />
+                                    <Image src={p.url} alt={p.description || `Photo ${p.id.slice(-4)}`} fill sizes="10vw" className="object-cover rounded" />
                                      <Button
                                          variant="destructive"
                                          size="icon"
-                                         className="absolute top-0.5 right-0.5 h-4 w-4 opacity-0 group-hover:opacity-100 transition-opacity"
+                                         className="absolute top-0.5 right-0.5 h-4 w-4 opacity-0 group-hover:opacity-100 transition-opacity z-10" // Ensure button is clickable
                                          onClick={() => removePhoto(p.id)}
+                                         title="Remove Photo"
                                      >
                                          <Trash2 className="h-2.5 w-2.5"/>
                                          <span className="sr-only">Remove Photo</span>
@@ -1251,7 +1378,7 @@ export function RoutePlanner() {
            {/* Action Buttons */}
           <div className="mt-auto flex flex-col gap-2 pt-4 border-t"> {/* Stick to bottom */}
              <Button onClick={handleSaveRoute} disabled={isSaving || !origin || !destination}>
-                {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : <><Save className="mr-2 h-4 w-4" /> Save Route</>}
+                {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : <><Save className="mr-2 h-4 w-4" /> {savedRouteId ? 'Update Route' : 'Save Route'}</>}
              </Button>
              <Button variant="outline" onClick={() => handleShareRoute(savedRouteId)} disabled={isSaving || !savedRouteId}>
                <Share2 className="mr-2 h-4 w-4" /> Share Saved Route
