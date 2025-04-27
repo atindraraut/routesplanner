@@ -777,12 +777,18 @@ export function RoutePlanner() {
         const shareUrl = `${window.location.origin}/view/${routeId}`;
         console.log("handleShareRoute: Constructed share URL:", shareUrl);
 
-        navigator.clipboard.writeText(shareUrl)
+         // Check if the clipboard API is available
+         if (!navigator.clipboard) {
+            console.error("handleShareRoute: Clipboard API not supported in this browser.");
+            toast({ title: "Copy Failed", description: "Your browser does not support the clipboard API.", variant: "destructive" });
+            return;
+        }
+         navigator.clipboard.writeText(shareUrl)
             .then(() => {
                 toast({ title: "Link Copied!", description: `Sharing link copied to clipboard.` });
             })
             .catch(err => {
-                console.error('Failed to copy share link:', err);
+                console.error('handleShareRoute: Failed to copy share link:', err.message, err);
                 toast({ title: "Copy Failed", description: "Could not copy the link automatically. Please copy it manually.", variant: "destructive" });
                  // Optionally show the link in the toast description or an alert
                  alert(`Share this link: ${shareUrl}`);
