@@ -717,6 +717,7 @@ export function RoutePlanner() {
         setIsSaving(true);
          // Generate a simple ID for local saving
         const generatedRouteId = `route-${Date.now().toString().slice(-6)}`; // Use last 6 digits of timestamp
+        console.log("handleSaveRoute: generatedRouteId created:", generatedRouteId);
 
 
         const routeData: StoredRouteData = {
@@ -731,6 +732,7 @@ export function RoutePlanner() {
         try {
              // Attempt to save to localStorage
             localStorage.setItem(`route_${generatedRouteId}`, JSON.stringify(routeData));
+            console.log("handleSaveRoute: Route saved to local storage with ID:", generatedRouteId);
             console.log("Route Saved to localStorage:", routeData);
             setSavedRouteId(generatedRouteId); // Store the generated ID
 
@@ -745,6 +747,7 @@ export function RoutePlanner() {
             });
 
         } catch (error: any) {
+            console.error("handleSaveRoute: Error saving route to localStorage:", error);
             console.error("Error saving route to localStorage:", error);
              let description = "Could not save the route locally.";
              if (error.name === 'QuotaExceededError') {
@@ -764,12 +767,15 @@ export function RoutePlanner() {
 
     // Copies the sharing link for the currently saved route to the clipboard
     const handleShareRoute = (routeId: string | null) => {
+        console.log("handleShareRoute: Received routeId:", routeId);
         if (!routeId) {
+            console.warn("handleShareRoute: routeId is null. Cannot share.");
             toast({ title: "Save Route First", description: "Please save the route before sharing.", variant: "destructive" });
             return;
         }
         // Construct the URL based on the current window location and the saved route ID
         const shareUrl = `${window.location.origin}/view/${routeId}`;
+        console.log("handleShareRoute: Constructed share URL:", shareUrl);
 
         navigator.clipboard.writeText(shareUrl)
             .then(() => {
