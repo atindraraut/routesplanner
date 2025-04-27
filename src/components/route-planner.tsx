@@ -205,6 +205,59 @@ export function RoutePlanner() {
 
   // --- Handlers ---
 
+  const createWaypoint = (place: google.maps.places.PlaceResult): Waypoint | null => {
+    if (!place.geometry?.location) return null;
+    return {
+        id: `wp-${Date.now()}-${Math.random().toString(16).slice(2)}`, // More unique ID
+        lat: place.geometry.location.lat(),
+        lng: place.geometry.location.lng(),
+        name: place.name || "Selected Location",
+        address: place.formatted_address || "Coordinates: " + place.geometry.location.lat().toFixed(5) + ", " + place.geometry.location.lng().toFixed(5)
+    };
+  }
+
+  const handleSetOrigin = useCallback((place: google.maps.places.PlaceResult) => { // Wrapped in useCallback
+     const newOrigin = createWaypoint(place);
+     if (newOrigin) {
+        setOrigin(newOrigin);
+        map?.panTo({ lat: newOrigin.lat, lng: newOrigin.lng });
+        if (originAutocompleteInputRef.current && place.formatted_address) {
+            originAutocompleteInputRef.current.value = place.formatted_address; // Update input field
+        }
+        setActiveMarker(newOrigin.id);
+     }
+  }, [map]); // Dependency: map instance
+
+  const handleSetDestination = useCallback((place: google.maps.places.PlaceResult) => { // Wrapped in useCallback
+     const newDest = createWaypoint(place);
+     if (newDest) {
+        setDestination(newDest);
+        map?.panTo({ lat: newDest.lat, lng: newDest.lng });
+        if (destinationAutocompleteInputRef.current && place.formatted_address) {
+             destinationAutocompleteInputRef.current.value = place.formatted_address; // Update input field
+        }
+         setActiveMarker(newDest.id);
+     }
+  }, [map]); // Dependency: map instance
+
+   const addIntermediateWaypoint = useCallback((lat: number, lng: number, name?: string, address?: string) => { // Wrapped in useCallback
+     if (intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS) {
+      toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_INTERMEDIATE_WAYPOINTS} intermediate waypoints.`, variant: "destructive" });
+      return;
+    }
+    const newWaypoint: Waypoint = {
+        id: `wp-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        lat,
+        lng,
+        name: name ?? `Waypoint ${intermediateWaypoints.length + 1}`,
+        address: address ?? `Coordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
+    };
+    setIntermediateWaypoints(prev => [...prev, newWaypoint]);
+    setActiveMarker(newWaypoint.id); // Make the new marker active
+    map?.panTo({ lat, lng });
+  }, [intermediateWaypoints.length, toast, map]); // Dependencies: length, toast, map
+
+
   const handleMapClick = useCallback((event: google.maps.MapMouseEvent) => {
     if (!event.latLng) return
 
@@ -234,60 +287,7 @@ export function RoutePlanner() {
          toast({ title: "Waypoint Added", description: "Intermediate point added by clicking the map." });
     }
 
-  }, [origin, destination, intermediateWaypoints, toast]);
-
-
-  const createWaypoint = (place: google.maps.places.PlaceResult): Waypoint | null => {
-    if (!place.geometry?.location) return null;
-    return {
-        id: `wp-${Date.now()}-${Math.random().toString(16).slice(2)}`, // More unique ID
-        lat: place.geometry.location.lat(),
-        lng: place.geometry.location.lng(),
-        name: place.name || "Selected Location",
-        address: place.formatted_address || "Coordinates: " + place.geometry.location.lat().toFixed(5) + ", " + place.geometry.location.lng().toFixed(5)
-    };
-  }
-
-  const handleSetOrigin = (place: google.maps.places.PlaceResult) => {
-     const newOrigin = createWaypoint(place);
-     if (newOrigin) {
-        setOrigin(newOrigin);
-        map?.panTo({ lat: newOrigin.lat, lng: newOrigin.lng });
-        if (originAutocompleteInputRef.current && place.formatted_address) {
-            originAutocompleteInputRef.current.value = place.formatted_address; // Update input field
-        }
-        setActiveMarker(newOrigin.id);
-     }
-  };
-
-  const handleSetDestination = (place: google.maps.places.PlaceResult) => {
-     const newDest = createWaypoint(place);
-     if (newDest) {
-        setDestination(newDest);
-        map?.panTo({ lat: newDest.lat, lng: newDest.lng });
-        if (destinationAutocompleteInputRef.current && place.formatted_address) {
-             destinationAutocompleteInputRef.current.value = place.formatted_address; // Update input field
-        }
-         setActiveMarker(newDest.id);
-     }
-  };
-
-   const addIntermediateWaypoint = (lat: number, lng: number, name?: string, address?: string) => {
-     if (intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS) {
-      toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_INTERMEDIATE_WAYPOINTS} intermediate waypoints.`, variant: "destructive" });
-      return;
-    }
-    const newWaypoint: Waypoint = {
-        id: `wp-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        lat,
-        lng,
-        name: name ?? `Waypoint ${intermediateWaypoints.length + 1}`,
-        address: address ?? `Coordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
-    };
-    setIntermediateWaypoints(prev => [...prev, newWaypoint]);
-    setActiveMarker(newWaypoint.id); // Make the new marker active
-    map?.panTo({ lat, lng });
-  }
+  }, [origin, destination, intermediateWaypoints, toast, handleSetOrigin, handleSetDestination, addIntermediateWaypoint]); // Added missing dependencies
 
 
   const removeWaypoint = (id: string) => {
@@ -317,9 +317,9 @@ export function RoutePlanner() {
     // Find the marker's coordinates and pan the map
     const allWaypoints = [origin, destination, ...intermediateWaypoints].filter(Boolean) as Waypoint[];
     const marker = allWaypoints.find(wp => wp.id === id) || photos.find(p => p.id === id);
-    if (marker) {
+    if (marker && map) { // Check if map exists
       const position = 'location' in marker ? marker.location : marker; // Check if photo or waypoint
-      map?.panTo(position);
+      map.panTo(position);
     }
   };
 
@@ -416,7 +416,6 @@ export function RoutePlanner() {
     }
 
     setIsSaving(true);
-    // --- In a real app: Save to Firebase Firestore ---
     // Generate a more predictable ID for mocking/testing
     const generatedRouteId = `route-${Date.now().toString().slice(0, 10)}`; // Use first 10 digits of timestamp for consistency
 
@@ -431,24 +430,34 @@ export function RoutePlanner() {
         // Optionally store directions, e.g., JSON.stringify(directions)
     };
 
-    console.log("Saving Route:", routeData); // Simulate saving
+    // --- Save to localStorage ---
+    try {
+        localStorage.setItem(`route_${generatedRouteId}`, JSON.stringify(routeData));
+        console.log("Route Saved to localStorage:", routeData); // Log success
+        setSavedRouteId(generatedRouteId); // Store the generated ID
 
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 1000));
+         toast({
+          title: "Route Saved!",
+          description: `Route "${routeName}" saved locally.`,
+          action: (
+             <Button variant="outline" size="sm" onClick={() => handleShareRoute(generatedRouteId)}>
+                <Share2 className="mr-2 h-4 w-4" /> Share
+             </Button>
+          )
+        });
 
-    setIsSaving(false);
-    setSavedRouteId(generatedRouteId); // Store the generated ID
-
-    toast({
-      title: "Route Saved!",
-      description: `Route "${routeName}" has been saved with ID: ${generatedRouteId}`,
-      action: (
-         <Button variant="outline" size="sm" onClick={() => handleShareRoute(generatedRouteId)}>
-            <Share2 className="mr-2 h-4 w-4" /> Share
-         </Button>
-      )
-    });
-    // --- End Simulation ---
+    } catch (error) {
+        console.error("Error saving route to localStorage:", error);
+        toast({
+            title: "Save Failed",
+            description: "Could not save the route locally. Storage might be full or restricted.",
+            variant: "destructive"
+        });
+         setSavedRouteId(null); // Clear ID on failure
+    } finally {
+         setIsSaving(false);
+    }
+    // --- End localStorage Save ---
   };
 
    const handleShareRoute = (routeId: string | null) => {
@@ -817,4 +826,3 @@ export function RoutePlanner() {
   );
 }
 
-    
