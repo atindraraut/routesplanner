@@ -10,7 +10,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "generate-test-images": "ts-node src/scripts/generate-test-images.ts"
+    "generate-test-images": "ts-node src/scripts/generate-test-images.ts --numImages=5 --fromLat=12.9716 --fromLng=77.5946 --toLat=17.3850 --toLng=78.4867"
   },
   "dependencies": {
     "@genkit-ai/googleai": "^1.0.4",
