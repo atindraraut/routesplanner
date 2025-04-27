@@ -1,3 +1,4 @@
+
 'use client'
 
 import type { Coordinates } from '@/types/maps'
@@ -13,9 +14,9 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
-import { Share2, Save, MapPin, Camera, Upload, Trash2 } from 'lucide-react';
+import { Share2, Save, MapPin, Camera, Upload, Trash2, LocateFixed, Flag, PlusCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import Image from 'next/image';
 import {
@@ -34,28 +35,34 @@ import {
 // --- Constants ---
 const DEFAULT_CENTER: Coordinates = { lat: 37.7749, lng: -122.4194 } // San Francisco
 const DEFAULT_ZOOM = 12
-const MAX_WAYPOINTS = 10 // Limit number of waypoints for performance/API usage
+const MAX_INTERMEDIATE_WAYPOINTS = 8 // Limit intermediate waypoints (Origin + Dest + 8 = 10 total)
 
 // --- Interfaces ---
 interface Waypoint extends Coordinates {
   id: string
   name?: string // Optional name for the waypoint
+  address?: string // Store formatted address
 }
 
 interface Photo {
   id: string;
-  url: string;
+  url: string; // Base64 or remote URL
   location: Coordinates;
-  waypointId?: string; // Link photo to a waypoint
+  waypointId?: string; // Link photo to a waypoint (Origin, Dest, or Intermediate ID)
   description?: string
 }
 
-interface RouteData {
+// Keep RouteData simple for saving; origin/dest are just special waypoints
+interface StoredRouteData {
   id: string;
   name: string;
-  waypoints: Waypoint[];
-    photos: Photo[]
-    directions?: google.maps.DirectionsResult | null
+  origin: Waypoint;
+  destination: Waypoint;
+  intermediateWaypoints: Waypoint[];
+  photos: Photo[];
+  // Storing full directions result might be large and prone to becoming outdated.
+  // It's often better to recalculate on load if needed.
+  // directionsResultJson?: string; // Optional: Store stringified DirectionsResult
 }
 
 // --- Component ---
@@ -66,20 +73,28 @@ export function RoutePlanner() {
   const { toast } = useToast()
 
   const [routeName, setRouteName] = useState<string>('My Awesome Route')
-  const [waypoints, setWaypoints] = useState<Waypoint[]>([])
+  const [origin, setOrigin] = useState<Waypoint | null>(null)
+  const [destination, setDestination] = useState<Waypoint | null>(null)
+  const [intermediateWaypoints, setIntermediateWaypoints] = useState<Waypoint[]>([])
   const [photos, setPhotos] = useState<Photo[]>([])
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null)
-  const [activeMarker, setActiveMarker] = useState<string | null>(null) // Waypoint or Photo ID
+  const [activeMarker, setActiveMarker] = useState<string | null>(null) // Waypoint ID (Origin, Dest, or Intermediate) or Photo ID
   const [directionsRenderer, setDirectionsRenderer] = useState<google.maps.DirectionsRenderer | null>(null)
   const [directionsService, setDirectionsService] = useState<google.maps.DirectionsService | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [showPhotoUpload, setShowPhotoUpload] = useState<Coordinates | null>(null)
   const [photoDescription, setPhotoDescription] = useState('')
+  const [photoWaypointId, setPhotoWaypointId] = useState<string | null>(null) // Track which waypoint photo is being added to
+
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const autocompleteInputRef = useRef<HTMLInputElement>(null);
-  const [autocomplete, setAutocomplete] = useState<google.maps.places.Autocomplete | null>(null);
+  const originAutocompleteInputRef = useRef<HTMLInputElement>(null);
+  const destinationAutocompleteInputRef = useRef<HTMLInputElement>(null);
+  const intermediateAutocompleteInputRef = useRef<HTMLInputElement>(null); // For adding intermediate points via search
 
+  const [originAutocomplete, setOriginAutocomplete] = useState<google.maps.places.Autocomplete | null>(null);
+  const [destinationAutocomplete, setDestinationAutocomplete] = useState<google.maps.places.Autocomplete | null>(null);
+  const [intermediateAutocomplete, setIntermediateAutocomplete] = useState<google.maps.places.Autocomplete | null>(null);
 
   // --- Effects ---
 
@@ -87,62 +102,89 @@ export function RoutePlanner() {
     useEffect(() => {
         if (!mapsLib || !map) return;
         setDirectionsService(new mapsLib.DirectionsService());
-        setDirectionsRenderer(new mapsLib.DirectionsRenderer({ map, suppressMarkers: true })); // Suppress default markers
+        setDirectionsRenderer(new mapsLib.DirectionsRenderer({
+            map,
+            suppressMarkers: true, // We use AdvancedMarker for custom markers
+            polylineOptions: {
+                strokeColor: 'hsl(var(--primary))',
+                strokeOpacity: 0.8,
+                strokeWeight: 6,
+            }
+        }));
     }, [mapsLib, map]);
 
-  // Initialize Places Autocomplete
+    const initializeAutocomplete = useCallback((
+        inputRef: React.RefObject<HTMLInputElement>,
+        setter: React.Dispatch<React.SetStateAction<google.maps.places.Autocomplete | null>>,
+        onPlaceChanged: (place: google.maps.places.PlaceResult) => void
+      ) => {
+        if (!placesLib || !inputRef.current) return null; // Return null if setup fails
+
+        const options = {
+          fields: ["formatted_address", "geometry", "name"],
+          strictBounds: false, // Be more flexible
+        };
+
+        const ac = new placesLib.Autocomplete(inputRef.current, options);
+        ac.addListener('place_changed', () => {
+            const place = ac.getPlace();
+            if (place.geometry?.location) {
+               onPlaceChanged(place);
+            } else {
+                 toast({ title: "Location not found", description: "Could not find coordinates for the selected place.", variant: "destructive" });
+            }
+             // Clear input after selection for intermediate waypoints only
+            if (inputRef === intermediateAutocompleteInputRef && inputRef.current) {
+                inputRef.current.value = '';
+            }
+        });
+         setter(ac); // Set the autocomplete instance in state
+         return ac; // Return the instance
+      }, [placesLib, toast]);
+
+
+      // Initialize Autocompletes
     useEffect(() => {
-    if (!placesLib || !autocompleteInputRef.current || autocomplete) return;
+        const acOrigin = initializeAutocomplete(originAutocompleteInputRef, setOriginAutocomplete, (place) => handleSetOrigin(place));
+        const acDest = initializeAutocomplete(destinationAutocompleteInputRef, setDestinationAutocomplete, (place) => handleSetDestination(place));
+        const acInter = initializeAutocomplete(intermediateAutocompleteInputRef, setIntermediateAutocomplete, (place) => {
+           if (place.geometry?.location) {
+                addIntermediateWaypoint(place.geometry.location.lat(), place.geometry.location.lng(), place.name, place.formatted_address);
+           }
+        });
 
-    const options = {
-        fields: ["formatted_address", "geometry", "name"],
-        strictBounds: false,
-      };
+        // Cleanup listeners on unmount
+        return () => {
+          if (window.google && window.google.maps) {
+             if (acOrigin) window.google.maps.event.clearInstanceListeners(acOrigin);
+             if (acDest) window.google.maps.event.clearInstanceListeners(acDest);
+             if (acInter) window.google.maps.event.clearInstanceListeners(acInter);
+          }
+        };
+        // Re-run if libraries load, but not on handler changes
+      }, [placesLib, initializeAutocomplete]);
 
-    const ac = new placesLib.Autocomplete(autocompleteInputRef.current, options);
-    setAutocomplete(ac);
 
-    ac.addListener('place_changed', () => {
-      const place = ac.getPlace();
-      if (place.geometry?.location) {
-        addWaypoint(place.geometry.location.lat(), place.geometry.location.lng(), place.name);
-        if (autocompleteInputRef.current) {
-            autocompleteInputRef.current.value = ''; // Clear input after selection
-        }
-      } else {
-        toast({ title: "Location not found", description: "Could not find coordinates for the selected place.", variant: "destructive" });
-      }
-    });
-
-    // Cleanup listener on unmount
-    return () => {
-      if (window.google && window.google.maps && autocomplete) {
-           window.google.maps.event.clearInstanceListeners(autocomplete);
-      }
-    };
-
-  }, [placesLib, autocomplete, map]); // Add map dependency to re-bind if map changes
-
-  // Update directions when waypoints change
+  // Update directions when origin, destination, or intermediate waypoints change
   useEffect(() => {
-    if (!directionsService || !directionsRenderer || waypoints.length < 2) {  
-      directionsRenderer?.setDirections(null); // Clear route if fewer than 2 waypoints
+    if (!directionsService || !directionsRenderer || !origin || !destination) {
+      directionsRenderer?.setDirections(null); // Clear route if no origin/dest
       setDirections(null);
       return;
     }
 
-    const origin = waypoints[0];
-    const destination = waypoints[waypoints.length - 1];
-    const intermediateWaypoints = waypoints
-      .slice(1, -1)
-      .map(wp => ({ location: { lat: wp.lat, lng: wp.lng }, stopover: true }));
+    const waypoints = intermediateWaypoints.map(wp => ({
+        location: { lat: wp.lat, lng: wp.lng },
+        stopover: true
+    }));
 
     directionsService.route(
       {
         origin: { lat: origin.lat, lng: origin.lng },
         destination: { lat: destination.lat, lng: destination.lng },
-        waypoints: intermediateWaypoints,
+        waypoints: waypoints,
         travelMode: google.maps.TravelMode.DRIVING, // Or other modes
+        optimizeWaypoints: true, // Let Google optimize the intermediate order if desired
       },
       (result, status) => {
         if (status === google.maps.DirectionsStatus.OK && result) {
@@ -156,33 +198,111 @@ export function RoutePlanner() {
         }
       }
     );
-  }, [waypoints, directionsService, directionsRenderer, toast]);
+    // Dependency array includes all route points
+  }, [origin, destination, intermediateWaypoints, directionsService, directionsRenderer, toast]);
 
 
   // --- Handlers ---
 
   const handleMapClick = useCallback((event: google.maps.MapMouseEvent) => {
     if (!event.latLng) return
-    if (waypoints.length >= MAX_WAYPOINTS) {
-      toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_WAYPOINTS} waypoints.`, variant: "destructive" });
-      return;
-    }
-    addWaypoint(event.latLng.lat(), event.latLng.lng());
-  }, [waypoints, toast]);
 
-  const addWaypoint = (lat: number, lng: number, name?: string) => {
-     if (waypoints.length >= MAX_WAYPOINTS) {
-      toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_WAYPOINTS} waypoints.`, variant: "destructive" });
+    if (!origin) {
+        // Set Origin if empty
+        handleSetOrigin({
+            geometry: { location: event.latLng },
+            name: "Selected Location",
+            formatted_address: "Dropped Pin" // Or use reverse geocoding later
+        });
+        toast({ title: "Origin Set", description: "Starting point added by clicking the map." });
+    } else if (!destination) {
+         // Set Destination if empty and origin is set
+        handleSetDestination({
+            geometry: { location: event.latLng },
+            name: "Selected Location",
+            formatted_address: "Dropped Pin"
+        });
+        toast({ title: "Destination Set", description: "Ending point added by clicking the map." });
+    } else {
+         // Add Intermediate Waypoint if origin & dest are set
+        if (intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS) {
+            toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_INTERMEDIATE_WAYPOINTS} intermediate waypoints.`, variant: "destructive" });
+            return;
+        }
+         addIntermediateWaypoint(event.latLng.lat(), event.latLng.lng(), "Added Waypoint", "Dropped Pin");
+         toast({ title: "Waypoint Added", description: "Intermediate point added by clicking the map." });
+    }
+
+  }, [origin, destination, intermediateWaypoints, toast]);
+
+
+  const createWaypoint = (place: google.maps.places.PlaceResult): Waypoint | null => {
+    if (!place.geometry?.location) return null;
+    return {
+        id: `wp-${Date.now()}-${Math.random().toString(16).slice(2)}`, // More unique ID
+        lat: place.geometry.location.lat(),
+        lng: place.geometry.location.lng(),
+        name: place.name || "Selected Location",
+        address: place.formatted_address || "Coordinates: " + place.geometry.location.lat().toFixed(5) + ", " + place.geometry.location.lng().toFixed(5)
+    };
+  }
+
+  const handleSetOrigin = (place: google.maps.places.PlaceResult) => {
+     const newOrigin = createWaypoint(place);
+     if (newOrigin) {
+        setOrigin(newOrigin);
+        map?.panTo({ lat: newOrigin.lat, lng: newOrigin.lng });
+        if (originAutocompleteInputRef.current && place.formatted_address) {
+            originAutocompleteInputRef.current.value = place.formatted_address; // Update input field
+        }
+        setActiveMarker(newOrigin.id);
+     }
+  };
+
+  const handleSetDestination = (place: google.maps.places.PlaceResult) => {
+     const newDest = createWaypoint(place);
+     if (newDest) {
+        setDestination(newDest);
+        map?.panTo({ lat: newDest.lat, lng: newDest.lng });
+        if (destinationAutocompleteInputRef.current && place.formatted_address) {
+             destinationAutocompleteInputRef.current.value = place.formatted_address; // Update input field
+        }
+         setActiveMarker(newDest.id);
+     }
+  };
+
+   const addIntermediateWaypoint = (lat: number, lng: number, name?: string, address?: string) => {
+     if (intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS) {
+      toast({ title: "Waypoint Limit Reached", description: `You can add a maximum of ${MAX_INTERMEDIATE_WAYPOINTS} intermediate waypoints.`, variant: "destructive" });
       return;
     }
-    const newWaypoint: Waypoint = { id: `wp-${Date.now()}`, lat, lng, name: name ?? `Waypoint ${waypoints.length + 1}` };
-    setWaypoints(prev => [...prev, newWaypoint]);
+    const newWaypoint: Waypoint = {
+        id: `wp-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        lat,
+        lng,
+        name: name ?? `Waypoint ${intermediateWaypoints.length + 1}`,
+        address: address ?? `Coordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
+    };
+    setIntermediateWaypoints(prev => [...prev, newWaypoint]);
     setActiveMarker(newWaypoint.id); // Make the new marker active
     map?.panTo({ lat, lng });
   }
 
+
   const removeWaypoint = (id: string) => {
-    setWaypoints(prev => prev.filter(wp => wp.id !== id));
+    if (origin?.id === id) {
+        setOrigin(null);
+        if (originAutocompleteInputRef.current) originAutocompleteInputRef.current.value = '';
+         toast({ title: "Origin Removed"});
+    } else if (destination?.id === id) {
+        setDestination(null);
+        if (destinationAutocompleteInputRef.current) destinationAutocompleteInputRef.current.value = '';
+         toast({ title: "Destination Removed"});
+    } else {
+        setIntermediateWaypoints(prev => prev.filter(wp => wp.id !== id));
+         toast({ title: "Waypoint Removed"});
+    }
+
     if (activeMarker === id) {
       setActiveMarker(null);
     }
@@ -192,35 +312,48 @@ export function RoutePlanner() {
 
   const handleMarkerClick = (id: string) => {
     setActiveMarker(id);
+    // Find the marker's coordinates and pan the map
+    const allWaypoints = [origin, destination, ...intermediateWaypoints].filter(Boolean) as Waypoint[];
+    const marker = allWaypoints.find(wp => wp.id === id) || photos.find(p => p.id === id);
+    if (marker) {
+      const position = 'location' in marker ? marker.location : marker; // Check if photo or waypoint
+      map?.panTo(position);
+    }
   };
 
   const handleInfoWindowClose = () => {
     setActiveMarker(null);
     setShowPhotoUpload(null);
     setPhotoDescription('');
+    setPhotoWaypointId(null);
   };
+
 
    const handleAddPhotoClick = (waypointId: string) => {
-    const waypoint = waypoints.find(wp => wp.id === waypointId);
-    if (waypoint) {
-      setShowPhotoUpload({ lat: waypoint.lat, lng: waypoint.lng });
-      // Optionally pre-fill description or link photo to waypoint
-      // setPhotoWaypointId(waypointId);
-    }
-  };
+        const allWaypoints = [origin, destination, ...intermediateWaypoints].filter(Boolean) as Waypoint[];
+        const waypoint = allWaypoints.find(wp => wp.id === waypointId);
 
-
-  const handleUploadClick = (waypointId: string) => {
-     const waypoint = waypoints.find(wp => wp.id === waypointId);
         if (waypoint && fileInputRef.current) {
-        setShowPhotoUpload({ lat: waypoint.lat, lng: waypoint.lng }); // Keep upload UI open
-        fileInputRef.current.click(); // Trigger file input
-      }
+          setShowPhotoUpload({ lat: waypoint.lat, lng: waypoint.lng });
+          setPhotoWaypointId(waypointId); // Link photo being uploaded to this waypoint
+          fileInputRef.current.click(); // Trigger file input immediately
+        } else {
+             toast({ title: "Error", description: "Could not find waypoint to add photo.", variant: "destructive" });
+        }
   };
 
 
   const handlePhotoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (!showPhotoUpload || !event.target.files || event.target.files.length === 0) return;
+    if (!showPhotoUpload || !photoWaypointId || !event.target.files || event.target.files.length === 0) {
+        // If the context was lost (e.g., user closed InfoWindow before selecting file), show error
+        if (!showPhotoUpload || !photoWaypointId) {
+            toast({ title: "Upload Cancelled", description: "Waypoint context lost. Please click 'Add Photo' on the waypoint again.", variant: "destructive"});
+        }
+         // Reset file input if needed
+        if (event.target) event.target.value = '';
+        return;
+    }
+
 
     const file = event.target.files[0];
     const reader = new FileReader();
@@ -229,21 +362,35 @@ export function RoutePlanner() {
       const newPhoto: Photo = {
         id: `photo-${Date.now()}`,
         url: reader.result as string, // Base64 URL
-        location: showPhotoUpload,
+        location: showPhotoUpload, // Use the coordinates stored when 'Add Photo' was clicked
         description: photoDescription,
-        // waypointId: photoWaypointId // Assign if needed
+        waypointId: photoWaypointId // Assign waypoint ID
       };
       setPhotos(prev => [...prev, newPhoto]);
-      toast({ title: "Photo Added", description: "Your photo has been tagged to the location." });
-      handleInfoWindowClose(); // Close upload UI after success
+      toast({ title: "Photo Added", description: "Your photo has been tagged to the waypoint." });
+
+      // Don't close info window automatically, let user add description if they want.
+      // Reset state for the next potential upload from the same window.
+      setPhotoDescription('');
+      setPhotoWaypointId(null); // Clear linked waypoint ID after successful upload
+      setShowPhotoUpload(null); // Hide the description/upload button area in the InfoWindow temporarily? No, keep it open maybe.
+      setActiveMarker(activeMarker); // Keep the same marker active
+
+
+       // Explicitly reset file input value here
+       if (fileInputRef.current) {
+         fileInputRef.current.value = '';
+       }
+    };
+
+     reader.onerror = () => {
+        toast({ title: "File Read Error", description: "Could not read the selected file.", variant: "destructive" });
+         if (fileInputRef.current) {
+           fileInputRef.current.value = '';
+         }
     };
 
     reader.readAsDataURL(file); // Read file as Base64
-
-     // Reset file input to allow uploading the same file again
-    if (event.target) {
-      event.target.value = '';
-    }
   };
 
   const removePhoto = (id: string) => {
@@ -260,26 +407,29 @@ export function RoutePlanner() {
       toast({ title: "Invalid Name", description: "Please enter a name for your route.", variant: "destructive" });
       return;
     }
-    if (waypoints.length < 2) {
-      toast({ title: "Not Enough Waypoints", description: "Please add at least two waypoints to save a route.", variant: "destructive" });
+    if (!origin || !destination) {
+      toast({ title: "Missing Points", description: "Please set both an origin and a destination.", variant: "destructive" });
       return;
     }
 
     setIsSaving(true);
     // --- In a real app: Save to Firebase Firestore ---
-    // 1. Create a new document in a 'routes' collection.
-    // 2. Store routeName, waypoints (as GeoPoints or simple objects), photos (URLs, locations, descriptions).
-    // 3. Consider storing the `directions` result (JSON stringified) if needed, but it might be better to recalculate on load.
+    // 1. Connect to Firebase.
+    // 2. Create a new document in a 'routes' collection.
+    // 3. Store routeName, origin, destination, intermediateWaypoints (as GeoPoints or simple objects),
+    //    and photos (URLs, locations, descriptions, waypointId).
     // 4. Generate a unique ID for the route.
 
-    const routeData: RouteData = {
+    const routeData: StoredRouteData = {
         id: `route-${Date.now()}`, // Placeholder ID
         name: routeName,
-        waypoints,
+        origin,
+        destination,
+        intermediateWaypoints,
         photos,
-        directions, // Optional: store calculated directions
+        // Optionally store directions, e.g., JSON.stringify(directions)
     };
-        
+
     console.log("Saving Route:", routeData); // Simulate saving
 
     // Simulate API call delay
@@ -299,7 +449,7 @@ export function RoutePlanner() {
   };
 
    const handleShareRoute = (routeId: string) => {
-     // In a real app, use the actual saved route ID
+     // In a real app, use the actual saved route ID from Firebase/backend
     const shareUrl = `${window.location.origin}/view/${routeId}`; // Example URL structure
     navigator.clipboard.writeText(shareUrl)
       .then(() => {
@@ -311,91 +461,126 @@ export function RoutePlanner() {
       });
   };
 
+
+  // --- Getters for Active Info ---
+  const getActiveWaypoint = (): Waypoint | null => {
+     if (!activeMarker) return null;
+     if (origin?.id === activeMarker) return origin;
+     if (destination?.id === activeMarker) return destination;
+     return intermediateWaypoints.find(wp => wp.id === activeMarker) || null;
+  }
+
+  const getActivePhoto = (): Photo | null => {
+     if (!activeMarker) return null;
+     return photos.find(p => p.id === activeMarker) || null;
+  }
+
+
+   // --- Render InfoWindow Content ---
    const renderActiveMarkerInfo = () => {
-    const activeWaypoint = waypoints.find(wp => wp.id === activeMarker);
-       const activePhoto = photos.find(p => p.id === activeMarker);
+    const activeWaypoint = getActiveWaypoint();
+    const activePhoto = getActivePhoto();
 
     if (activeWaypoint) {
+      const isOrigin = origin?.id === activeWaypoint.id;
+      const isDestination = destination?.id === activeWaypoint.id;
+      let waypointType = "Waypoint";
+      if (isOrigin) waypointType = "Origin";
+      else if (isDestination) waypointType = "Destination";
+
       return (
         <InfoWindow
           position={activeWaypoint}
           onCloseClick={handleInfoWindowClose}
           headerDisabled // Use custom header/content
-          >
-           <div className="p-2 min-w-48">
-            <h4 className="text-md font-semibold mb-2">{activeWaypoint.name || `Waypoint ${waypoints.findIndex(wp => wp.id === activeWaypoint.id) + 1}`}</h4>
-             <p className="text-xs text-muted-foreground mb-2">
-                Lat: {activeWaypoint.lat.toFixed(4)}, Lng: {activeWaypoint.lng.toFixed(4)}
-             </p>
-            <div className="flex space-x-2 mt-2">
-                 <Button size="sm" variant="outline" onClick={() => handleUploadClick(activeWaypoint.id)}>
-                    <Camera className="mr-1 h-4 w-4" /> Add Photo
-                </Button>
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button size="sm" variant="destructive">
-                        <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Remove Waypoint?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Are you sure you want to remove this waypoint and its associated photos?
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction onClick={() => removeWaypoint(activeWaypoint.id)} className="bg-destructive hover:bg-destructive/90">
-                        Remove
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
+        >
+          <div className="p-2 min-w-[250px] max-w-xs space-y-3">
+            <h4 className="text-md font-semibold flex items-center gap-2">
+               {isOrigin && <LocateFixed className="w-4 h-4 text-blue-600" />}
+               {isDestination && <Flag className="w-4 h-4 text-red-600" />}
+               {!isOrigin && !isDestination && <MapPin className="w-4 h-4 text-gray-600" />}
+               {activeWaypoint.name || waypointType}
+            </h4>
+            {activeWaypoint.address && (
+                 <p className="text-xs text-muted-foreground">{activeWaypoint.address}</p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Lat: {activeWaypoint.lat.toFixed(4)}, Lng: {activeWaypoint.lng.toFixed(4)}
+            </p>
+
+            {/* Actions */}
+            <div className="flex flex-col sm:flex-row gap-2 mt-2">
+              <Button size="sm" variant="outline" onClick={() => handleAddPhotoClick(activeWaypoint.id)}>
+                <Camera className="mr-1 h-4 w-4" /> Add Photo
+              </Button>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button size="sm" variant="destructive" className="flex-grow sm:flex-grow-0">
+                    <Trash2 className="mr-1 h-4 w-4" /> Remove
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Remove {waypointType}?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Are you sure you want to remove this {waypointType.toLowerCase()} and its associated photos? This action cannot be undone.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => removeWaypoint(activeWaypoint.id)} className="bg-destructive hover:bg-destructive/90">
+                      Remove
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
-             {showPhotoUpload && showPhotoUpload.lat === activeWaypoint.lat && showPhotoUpload.lng === activeWaypoint.lng && (
-                <div className="mt-4 border-t pt-4">
-                  <h5 className="text-sm font-medium mb-2">Upload Photo</h5>
-                   <Input
-                      type="file"
-                      accept="image/*"
-                      ref={fileInputRef} // Attach ref here
-                      onChange={handlePhotoUpload}
-                      className="mb-2 hidden" // Hide default input
-                    />
-                    {/* Custom trigger button handled by handleUploadClick */}
+
+             {/* Photo Upload UI (Only appears if waypointId matches this active waypoint) */}
+             {photoWaypointId === activeWaypoint.id && (
+                <div className="mt-4 border-t pt-3 space-y-2">
+                  <h5 className="text-sm font-medium">Add description for new photo:</h5>
                   <Textarea
-                    placeholder="Add a description (optional)"
+                    placeholder="Description (optional)"
                     value={photoDescription}
                     onChange={(e) => setPhotoDescription(e.target.value)}
-                    className="mb-2"
                   />
-                  {/* The actual upload is triggered programmatically */}
+                  {/* Upload is triggered by handleAddPhotoClick, confirmation happens in handlePhotoUpload */}
+                   <p className="text-xs text-muted-foreground">Select a photo file to upload.</p>
                 </div>
               )}
+
           </div>
         </InfoWindow>
       );
     }
 
     if (activePhoto) {
+       const linkedWaypoint = [origin, destination, ...intermediateWaypoints]
+          .filter(Boolean)
+          .find(wp => wp?.id === activePhoto.waypointId);
+
        return (
         <InfoWindow
           position={activePhoto.location}
           onCloseClick={handleInfoWindowClose}
           headerDisabled
         >
-           <div className="p-2 max-w-xs">
+           <div className="p-2 max-w-xs space-y-2">
+             <h5 className="text-sm font-semibold mb-1">Photo</h5>
              {activePhoto.url && (
                 <Image
                     src={activePhoto.url}
                     alt={activePhoto.description || 'Route photo'}
                     width={200}
                     height={150}
-                    className="rounded-md mb-2 object-cover"
+                    className="rounded-md mb-2 object-cover w-full"
                  />
              )}
              {activePhoto.description && <p className="text-sm mb-2">{activePhoto.description}</p>}
+            {linkedWaypoint && (
+                <p className="text-xs text-muted-foreground">Linked to: {linkedWaypoint.name}</p>
+            )}
             <p className="text-xs text-muted-foreground mb-2">
                 Lat: {activePhoto.location.lat.toFixed(4)}, Lng: {activePhoto.location.lng.toFixed(4)}
              </p>
@@ -428,61 +613,85 @@ export function RoutePlanner() {
     return null;
   };
 
+   // Helper to get all waypoints for marker rendering
+    const getAllWaypoints = (): Waypoint[] => {
+        const points = [];
+        if (origin) points.push(origin);
+        points.push(...intermediateWaypoints);
+        if (destination) points.push(destination);
+        return points;
+    };
+
 
   // --- Render ---
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 h-[calc(100vh-10rem)]"> {/* Adjust height as needed */}
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 h-[calc(100vh-8rem)]"> {/* Adjust height calc */}
             {/* Map Area */}
-            <div className="md:col-span-2 h-full rounded-lg overflow-hidden shadow-md">
+            <div className="md:col-span-2 h-full rounded-lg overflow-hidden shadow-md border border-border">
                 <Map
-                    mapId={'route_snap_map'} // Optional: For cloud-based map styling
+                    mapId={'route_snap_map_v2'} // Unique ID
                     defaultCenter={DEFAULT_CENTER}
                     defaultZoom={DEFAULT_ZOOM}
                     gestureHandling={'greedy'}
-          disableDefaultUI={true}
-          onClick={handleMapClick}
-          className="w-full h-full"
-        >
-          {/* Waypoint Markers */}
-          {waypoints.map((waypoint, index) => (
-            <AdvancedMarker
-              key={waypoint.id}
-              position={waypoint}
-              onClick={() => handleMarkerClick(waypoint.id)}
-            >
-              <Pin background={'hsl(var(--primary))'} glyphColor={'#fff'} borderColor={'#fff'}>
-                {/* Display index + 1 */}
-                <span className="text-xs font-bold">{index + 1}</span>
-              </Pin>
-            </AdvancedMarker>
-          ))}
+                    disableDefaultUI={true} // Keep it clean
+                    onClick={handleMapClick} // Handles adding points
+                    className="w-full h-full"
+                    mapTypeControl={false}
+                    streetViewControl={false}
+                    fullscreenControl={false}
+                >
+                    {/* Waypoint Markers */}
+                    {getAllWaypoints().map((waypoint, index) => {
+                         const isOrigin = origin?.id === waypoint.id;
+                         const isDestination = destination?.id === waypoint.id;
+                         const isIntermediate = !isOrigin && !isDestination;
+                         const pinColor = isOrigin ? '#3b82f6' : isDestination ? '#ef4444' : '#6b7280'; // Blue, Red, Gray
+                         const glyph = isOrigin ? <LocateFixed className="w-4 h-4 text-white"/> : isDestination ? <Flag className="w-4 h-4 text-white"/> : <span className="text-xs font-bold">{intermediateWaypoints.findIndex(wp => wp.id === waypoint.id) + 1}</span>;
 
-          {/* Photo Markers */}
-          {photos.map((photo) => (
-            <AdvancedMarker
-              key={photo.id}
-              position={photo.location}
-              onClick={() => handleMarkerClick(photo.id)}
-            >
-              {/* Custom Photo Icon */}
-               <div className="p-1 bg-accent rounded-full shadow cursor-pointer">
-                 <Camera className="w-4 h-4 text-accent-foreground" />
-               </div>
-            </AdvancedMarker>
-          ))}
+                         return (
+                            <AdvancedMarker
+                            key={waypoint.id}
+                            position={waypoint}
+                            onClick={() => handleMarkerClick(waypoint.id)}
+                            title={waypoint.name || `Waypoint ${index + 1}`} // Tooltip on hover
+                            >
+                                <Pin background={pinColor} glyphColor={'#fff'} borderColor={'#fff'}>
+                                    {glyph}
+                                </Pin>
+                            </AdvancedMarker>
+                        );
+                    })}
 
-           {/* Active Marker InfoWindow */}
-            {renderActiveMarkerInfo()}
+                    {/* Photo Markers */}
+                    {photos.map((photo) => (
+                        <AdvancedMarker
+                        key={photo.id}
+                        position={photo.location}
+                        onClick={() => handleMarkerClick(photo.id)}
+                        title={photo.description || "View Photo"}
+                        >
+                        <div className="p-1 bg-accent rounded-full shadow-md cursor-pointer transform hover:scale-110 transition-transform">
+                            <Camera className="w-4 h-4 text-accent-foreground" />
+                        </div>
+                        </AdvancedMarker>
+                    ))}
 
-        </Map>
-      </div>
+                    {/* Active Marker InfoWindow */}
+                    {renderActiveMarkerInfo()}
+
+                    {/* DirectionsRenderer handles drawing the route line - initialized in useEffect */}
+
+                </Map>
+            </div>
 
       {/* Controls Area */}
       <Card className="h-full flex flex-col">
         <CardHeader>
           <CardTitle>Plan Your Route</CardTitle>
+           <CardDescription>Set origin, destination, and add stops.</CardDescription>
         </CardHeader>
-        <CardContent className="flex-grow flex flex-col gap-4 overflow-y-auto">
+        <CardContent className="flex-grow flex flex-col gap-4 overflow-y-auto p-4">
+          {/* Route Name */}
           <div className="space-y-1">
             <Label htmlFor="routeName">Route Name</Label>
             <Input
@@ -493,25 +702,75 @@ export function RoutePlanner() {
             />
           </div>
 
-           <div className="space-y-1">
-             <Label htmlFor="searchLocation">Search & Add Location</Label>
-             <Input
-               id="searchLocation"
-               ref={autocompleteInputRef}
-               placeholder="Search for a place or address"
-              />
-           </div>
+          {/* Origin Input */}
+          <div className="space-y-1">
+            <Label htmlFor="originLocation" className="flex items-center gap-1">
+                <LocateFixed className="w-4 h-4 text-blue-600"/> Origin
+            </Label>
+            <Input
+              id="originLocation"
+              ref={originAutocompleteInputRef}
+              placeholder="Search or click map for start point"
+              className="border-blue-300 focus:border-blue-500 focus:ring-blue-500"
+            />
+            {origin && (
+                <div className="text-xs text-muted-foreground p-1 flex justify-between items-center">
+                    <span className="truncate pr-2" title={origin.address}>{origin.name}</span>
+                    <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-destructive" onClick={() => removeWaypoint(origin!.id)}>
+                        <Trash2 className="h-3 w-3"/> <span className="sr-only">Remove Origin</span>
+                    </Button>
+                </div>
+            )}
+          </div>
 
-          <div className="space-y-2 flex-grow">
-            <Label>Waypoints ({waypoints.length}/{MAX_WAYPOINTS})</Label>
-             <p className="text-xs text-muted-foreground">Click on the map or search to add waypoints.</p>
-            {waypoints.length === 0 && <p className="text-sm text-muted-foreground text-center py-4">No waypoints added yet.</p>}
+          {/* Destination Input */}
+          <div className="space-y-1">
+            <Label htmlFor="destinationLocation" className="flex items-center gap-1">
+                <Flag className="w-4 h-4 text-red-600"/> Destination
+            </Label>
+            <Input
+              id="destinationLocation"
+              ref={destinationAutocompleteInputRef}
+              placeholder="Search or click map for end point"
+              className="border-red-300 focus:border-red-500 focus:ring-red-500"
+            />
+             {destination && (
+                <div className="text-xs text-muted-foreground p-1 flex justify-between items-center">
+                   <span className="truncate pr-2" title={destination.address}>{destination.name}</span>
+                    <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-destructive" onClick={() => removeWaypoint(destination!.id)}>
+                        <Trash2 className="h-3 w-3"/> <span className="sr-only">Remove Destination</span>
+                    </Button>
+                </div>
+            )}
+          </div>
+
+          {/* Add Intermediate Waypoint */}
+          <div className="space-y-1">
+            <Label htmlFor="intermediateLocation" className="flex items-center gap-1">
+                <PlusCircle className="w-4 h-4 text-gray-600"/> Add Stop / Waypoint
+            </Label>
+            <Input
+              id="intermediateLocation"
+              ref={intermediateAutocompleteInputRef}
+              placeholder="Search or click map for stops"
+              disabled={intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS}
+              className="border-gray-300 focus:border-gray-500 focus:ring-gray-500"
+            />
+             {intermediateWaypoints.length >= MAX_INTERMEDIATE_WAYPOINTS && (
+                <p className="text-xs text-destructive">Maximum intermediate waypoints reached.</p>
+            )}
+          </div>
+
+           {/* Intermediate Waypoints List */}
+          <div className="space-y-2 flex-grow min-h-[100px]"> {/* Ensure list has some min height */}
+            <Label>Stops ({intermediateWaypoints.length}/{MAX_INTERMEDIATE_WAYPOINTS})</Label>
+            {intermediateWaypoints.length === 0 && <p className="text-sm text-muted-foreground text-center py-4">No stops added yet.</p>}
             <ul className="space-y-2">
-               {waypoints.map((wp, index) => (
-                <li key={wp.id} className="flex items-center justify-between p-2 bg-secondary/30 rounded-md text-sm">
+               {intermediateWaypoints.map((wp, index) => (
+                <li key={wp.id} className="flex items-center justify-between p-2 bg-secondary/50 rounded-md text-sm">
                    <div className="flex items-center gap-2 overflow-hidden">
-                     <span className="flex-shrink-0 w-5 h-5 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-xs font-bold">{index + 1}</span>
-                     <span className="truncate" title={wp.name || `Waypoint ${index + 1}`}>{wp.name || `Waypoint ${index + 1}`}</span>
+                     <span className="flex-shrink-0 w-5 h-5 bg-gray-500 text-white rounded-full flex items-center justify-center text-xs font-bold">{index + 1}</span>
+                     <span className="truncate" title={wp.address || wp.name}>{wp.name}</span>
                   </div>
                    <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={() => removeWaypoint(wp.id)}>
                       <Trash2 className="h-4 w-4" />
@@ -521,11 +780,14 @@ export function RoutePlanner() {
               ))}
             </ul>
           </div>
-          <div className="mt-auto flex flex-col gap-2">
-             <Button onClick={handleSaveRoute} disabled={isSaving || waypoints.length < 2}>
+
+           {/* Action Buttons */}
+          <div className="mt-auto flex flex-col gap-2 pt-4 border-t">
+             <Button onClick={handleSaveRoute} disabled={isSaving || !origin || !destination}>
                 {isSaving ? 'Saving...' : <><Save className="mr-2 h-4 w-4" /> Save Route</>}
              </Button>
-             <Button variant="outline" onClick={() => handleShareRoute(`route-${Date.now()}`)} disabled={isSaving || waypoints.length < 2}>
+             {/* Share button might need the actual ID after saving, disable until saved or use placeholder */}
+             <Button variant="outline" onClick={() => handleShareRoute(`route-${Date.now()}`)} disabled={isSaving || !origin || !destination}>
                <Share2 className="mr-2 h-4 w-4" /> Share Route
              </Button>
           </div>
@@ -543,3 +805,5 @@ export function RoutePlanner() {
     </div>
   );
 }
+
+    
