@@ -3,6 +3,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
 import Route from '@/lib/models/Route';
 import type { Photo } from '@/lib/models/Route'; // Import Photo type if needed separately
+import { writeFile } from 'fs/promises';
+import * as fs from 'fs';
+import { join } from 'path';
 
 // --- Mock Cloud Storage Upload ---
 // In a real application, replace this with your actual cloud storage logic (e.g., Firebase Storage, AWS S3)
@@ -44,18 +47,24 @@ export async function POST(request: NextRequest) {
 
         // Basic validation
         if (!routeId || !photoDataUrl || !location || !locationSource) {
-             console.error("API POST /api/photos/upload: Validation failed - Missing required fields");
+            console.error("API POST /api/photos/upload: Validation failed - Missing required fields");
             return NextResponse.json({ message: 'Missing required fields (routeId, photoDataUrl, location, locationSource)' }, { status: 400 });
         }
 
-        // 1. Upload photo to cloud storage (using mock function here)
+        // 1. Save photo locally
         const photoId = `photo-${Date.now()}-${Math.random().toString(16).slice(2)}`; // Generate unique ID
         const fileName = `${routeId}_${photoId}.jpg`; // Example filename structure
-        const photoUrl = await uploadToCloudStorage(photoDataUrl, fileName); // Get URL from storage
+        const filePath = join(process.cwd(), 'public', 'uploads', fileName); // Save in 'public/uploads' directory
 
-        if (!photoUrl) {
-            throw new Error("Failed to upload photo to storage.");
-        }
+        // Decode base64 and write to file
+        const base64Data = photoDataUrl.split(',')[1]; // Remove the data URL prefix
+        // Ensure the directory exists
+        const uploadsDir = join(process.cwd(), 'public', 'uploads');
+        await fs.promises.mkdir(uploadsDir, { recursive: true });
+
+        // Write the file
+        await writeFile(filePath, Buffer.from(base64Data, 'base64'));
+        const photoUrl = `/uploads/${fileName}`; // Relative URL to access the file
 
         // 2. Prepare photo metadata object
         const newPhoto: Photo = {
@@ -67,28 +76,23 @@ export async function POST(request: NextRequest) {
             locationSource: locationSource,
         } as Photo; // Cast necessary if Photo extends Document
 
-         // 3. Add photo metadata to the specific Route document in MongoDB
-         console.log(`API POST /api/photos/upload: Adding photo ${photoId} to route ${routeId}`);
-         const updateResult = await Route.updateOne(
-             { id: routeId }, // Find the route by its ID
-             { $push: { photos: newPhoto } } // Add the new photo object to the 'photos' array
-         );
+        // 3. Add photo metadata to the specific Route document in MongoDB
+        console.log(`API POST /api/photos/upload: Adding photo ${photoId} to route ${routeId}`);
+        const updateResult = await Route.updateOne(
+            { id: routeId }, // Find the route by its ID
+            { $push: { photos: newPhoto } } // Add the new photo object to the 'photos' array
+        );
 
-         console.log("API POST /api/photos/upload: MongoDB updateOne result:", updateResult);
+        console.log("API POST /api/photos/upload: MongoDB updateOne result:", updateResult);
 
-         if (updateResult.matchedCount === 0) {
-             console.log(`API POST /api/photos/upload: Route ${routeId} not found for adding photo.`);
-             // Consider if you should delete the uploaded photo from storage here
-             return NextResponse.json({ message: `Route with ID ${routeId} not found.` }, { status: 404 });
-         }
-         if (updateResult.modifiedCount === 0) {
-             // This might happen if the update operation didn't change the document (e.g., error, or race condition)
-             console.warn(`API POST /api/photos/upload: Route ${routeId} found but photo was not added.`);
-             // Consider potential issues or if this is an acceptable state
-             // Might still return success but log a warning
-             // For now, treat as potential error
-             return NextResponse.json({ message: 'Route found, but photo could not be added to the database.' }, { status: 500 });
-         }
+        if (updateResult.matchedCount === 0) {
+            console.log(`API POST /api/photos/upload: Route ${routeId} not found for adding photo.`);
+            return NextResponse.json({ message: `Route with ID ${routeId} not found.` }, { status: 404 });
+        }
+        if (updateResult.modifiedCount === 0) {
+            console.warn(`API POST /api/photos/upload: Route ${routeId} found but photo was not added.`);
+            return NextResponse.json({ message: 'Route found, but photo could not be added to the database.' }, { status: 500 });
+        }
 
         console.log(`API POST /api/photos/upload: Photo ${photoId} added to route ${routeId} successfully.`);
         // Return the ID and URL of the newly added photo

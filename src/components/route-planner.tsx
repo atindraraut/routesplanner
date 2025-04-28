@@ -166,65 +166,55 @@ function convertDMSToDD(dms: number[] | undefined, ref: string | undefined): num
 // Returns a Promise that resolves with Coordinates or rejects with an error message.
 const extractLocationFromPhoto = (file: File): Promise<Coordinates> => {
     console.log("extractLocationFromPhoto: Starting extraction for file:", file.name, "Size:", file.size);
+
     return new Promise((resolve, reject) => {
-        // Read the file initially to pass to EXIF.js
         const reader = new FileReader();
 
-        reader.onload = (loadEvent) => {
-             // Use the ArrayBuffer result for EXIF.js
-             const buffer = loadEvent.target?.result as ArrayBuffer;
-             if (!buffer) {
-                  console.error("extractLocationFromPhoto: FileReader failed to produce ArrayBuffer.");
-                  return reject("Could not read the selected file.");
-             }
-             console.log("extractLocationFromPhoto: File read successfully as ArrayBuffer (size:", buffer.byteLength, ")");
+        reader.onload = (event) => {
+            const arrayBuffer = event.target?.result as ArrayBuffer;
+            if (!arrayBuffer) {
+                console.error("extractLocationFromPhoto: Failed to read file as ArrayBuffer.");
+                return reject("Unable to read the selected file.");
+            }
 
-             try {
-                // exif-js expects the image data buffer
-                EXIF.getData(buffer as any, function () { // `this` context is important here
-                    console.log("extractLocationFromPhoto: EXIF.getData callback executed.");
-                    const allMetaData = EXIF.getAllTags(this);
-                     // console.debug("extractLocationFromPhoto: All EXIF MetaData:", allMetaData);
+            try {
+                const exifData = EXIF.readFromBinaryFile(arrayBuffer);
+                const latArr = exifData?.GPSLatitude as GPSLatitude | undefined;
+                const lonArr = exifData?.GPSLongitude as GPSLongitude | undefined;
+                const latRef = exifData?.GPSLatitudeRef as string | undefined;
+                const lonRef = exifData?.GPSLongitudeRef as string | undefined;
 
-                    const latArr = EXIF.getTag(this, "GPSLatitude") as GPSLatitude | undefined;
-                    const lonArr = EXIF.getTag(this, "GPSLongitude") as GPSLongitude | undefined;
-                    const latRef = EXIF.getTag(this, "GPSLatitudeRef") as string | undefined;
-                    const lonRef = EXIF.getTag(this, "GPSLongitudeRef") as string | undefined;
+                console.debug("extractLocationFromPhoto: Extracted GPS data - latArr:", latArr, "lonArr:", lonArr, "latRef:", latRef, "lonRef:", lonRef);
 
-                    console.debug("extractLocationFromPhoto: Extracted GPS Tags - latArr:", latArr, "lonArr:", lonArr, "latRef:", latRef, "lonRef:", lonRef);
+                if (latArr && lonArr && latRef && lonRef) {
+                    const lat = convertDMSToDD(latArr, latRef);
+                    const lng = convertDMSToDD(lonArr, lonRef);
 
-                    if (latArr && lonArr && latRef && lonRef) {
-                        const lat = convertDMSToDD(latArr, latRef);
-                        const lng = convertDMSToDD(lonArr, lonRef);
-                        console.log("extractLocationFromPhoto: Converted coordinates - lat:", lat, "lng:", lng);
-
-                        if (lat !== null && lng !== null && !isNaN(lat) && !isNaN(lng)) {
-                            console.log(`extractLocationFromPhoto: Successfully extracted location for ${file.name}:`, { lat, lng });
-                            resolve({ lat, lng });
-                        } else {
-                            console.warn(`extractLocationFromPhoto: Could not parse valid GPS data from photo ${file.name}. Conversion resulted in invalid numbers.`);
-                            reject(`Could not parse valid GPS data from photo ${file.name}.`);
-                        }
+                    if (lat !== null && lng !== null && !isNaN(lat) && !isNaN(lng)) {
+                        console.log(`extractLocationFromPhoto: Successfully extracted location for ${file.name}:`, { lat, lng });
+                        resolve({ lat, lng });
                     } else {
-                         console.warn(`extractLocationFromPhoto: No complete GPS data found in photo ${file.name} metadata.`);
-                        reject(`No complete GPS data found in photo ${file.name} metadata.`);
+                        console.warn(`extractLocationFromPhoto: Invalid GPS data in photo ${file.name}.`);
+                        reject(`Invalid GPS data in photo ${file.name}.`);
                     }
-                });
-             } catch (exifError) {
-                  console.error(`extractLocationFromPhoto: Error during EXIF.getData for ${file.name}:`, exifError);
-                  reject(`Error processing EXIF data for ${file.name}.`);
-             }
+                } else {
+                    console.warn(`extractLocationFromPhoto: GPS data missing in photo ${file.name}.`);
+                    reject(`GPS data missing in photo ${file.name}.`);
+                }
+            } catch (error) {
+                console.error(`extractLocationFromPhoto: Error reading EXIF data for ${file.name}:`, error);
+                reject(`Error reading EXIF data for ${file.name}.`);
+            }
         };
 
-         reader.onerror = (errorEvent) => {
-             console.error("extractLocationFromPhoto: FileReader error:", errorEvent.target?.error);
-             reject("Could not read the selected file: " + errorEvent.target?.error?.message);
-         };
+        reader.onerror = () => {
+            console.error("extractLocationFromPhoto: FileReader encountered an error.");
+            reject("Error reading the selected file.");
+        };
 
-         // Read as ArrayBuffer for EXIF.js
-         reader.readAsArrayBuffer(file);
+        reader.readAsArrayBuffer(file);
     });
-}
+};
 
 
 // --- Component ---
@@ -666,15 +656,13 @@ export function RoutePlanner() {
              toast({ title: "Error", description: "Could not initiate photo upload.", variant: "destructive" });
         }
     };
-
-
-     // Handles the file selection from the <input type="file">
+    // Handles the file selection from the <input type="file">
     const handlePhotoFilesSelected = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
         if (!files || files.length === 0 || !savedRouteId) {
-             if (!savedRouteId) {
-                 toast({ title: "Save Route First", description: "Please save the route before uploading photos.", variant: "default" });
-             }
+            if (!savedRouteId) {
+                toast({ title: "Save Route First", description: "Please save the route before uploading photos.", variant: "default" });
+            }
             setPhotoUploadWaypointContext(null); // Clear context if no file selected or route not saved
             return;
         }
@@ -683,113 +671,65 @@ export function RoutePlanner() {
         toast({ title: "Processing Photos...", description: `Attempting to upload ${files.length} photo(s). This may take a moment.` });
 
         const fileArray = Array.from(files);
-        let photosAddedCount = 0;
-        let photosFailedCount = 0;
+        const uploadResults = await Promise.all(
+            fileArray.map(async (file) => {
+                try {
+                    // Read file as Data URL
+                    const dataUrl = await new Promise<string>((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result as string);
+                        reader.onerror = (e) => reject("Failed to read file: " + e.target?.error?.message);
+                        reader.readAsDataURL(file);
+                    });
 
-        for (const file of fileArray) {
-            let photoLocation: Coordinates | null = null;
-            let locationSource: 'exif' | 'waypoint' = 'waypoint'; // Default
-            let dataUrl: string; // For sending to backend
+                    // Extract EXIF location
+                    let photoLocation: Coordinates | null = null;
+                    let locationSource: 'exif' | 'waypoint' = 'waypoint';
+                    try {
+                        photoLocation = await extractLocationFromPhoto(file);
+                        locationSource = 'exif';
+                    } catch {
+                        if (photoUploadWaypointContext) {
+                            photoLocation = photoUploadWaypointContext.location;
+                        } else {
+                            throw new Error("No EXIF data and no waypoint context available.");
+                        }
+                    }
 
-            // 1. Read file as Data URL to send to backend
-            try {
-                dataUrl = await new Promise<string>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => resolve(reader.result as string);
-                    reader.onerror = (e) => reject("Failed to read file: " + e.target?.error?.message);
-                    reader.readAsDataURL(file);
-                });
-                console.log(`handlePhotoFilesSelected: Read ${file.name} as data URL.`);
-            } catch (readError) {
-                console.error(`handlePhotoFilesSelected: Error reading file ${file.name}:`, readError);
-                toast({ title: "Upload Error", description: `Could not read file ${file.name}.`, variant: "destructive" });
-                photosFailedCount++;
-                continue; // Skip this file
-            }
+                    // Prepare photo info
+                    const photoInfo: Omit<Photo, 'url' | 'id'> = {
+                        location: photoLocation!,
+                        description: photoDescription || '',
+                        waypointId: locationSource === 'waypoint' ? photoUploadWaypointContext?.id : undefined,
+                        locationSource,
+                    };
 
-            // 2. Try to extract EXIF location (client-side check before upload)
-            try {
-                photoLocation = await extractLocationFromPhoto(file);
-                locationSource = 'exif';
-                console.log(`handlePhotoFilesSelected: EXIF location found for ${file.name}:`, photoLocation);
-            } catch (exifError: any) {
-                console.warn(`handlePhotoFilesSelected: Could not extract EXIF location from ${file.name}:`, exifError);
-                if (photoUploadWaypointContext) {
-                    photoLocation = photoUploadWaypointContext.location;
-                    locationSource = 'waypoint';
-                    console.log(`handlePhotoFilesSelected: Falling back to waypoint location for ${file.name}:`, photoLocation);
-                } else {
-                    console.error(`handlePhotoFilesSelected: No EXIF data and no waypoint context for ${file.name}. Cannot determine location.`);
-                    toast({ title: "Location Missing", description: `Could not determine location for ${file.name}. Photo not added.`, variant: "destructive" });
-                     photosFailedCount++;
-                    continue; // Skip this file
+                    // Upload photo
+                    const result = await uploadPhotoAction(dataUrl, savedRouteId, photoInfo);
+                    if (result.success && result.photoId && result.photoUrl) {
+                        setPhotos((prev) => [...prev, { id: result.photoId, url: result.photoUrl, ...photoInfo }]);
+                        return { success: true };
+                    } else {
+                        throw new Error(result.error || "Unknown upload error");
+                    }
+                } catch (error: any) {
+                    console.error(`Failed to upload photo ${file.name}:`, error);
+                    return { success: false, error: error.message };
                 }
-            }
+            })
+        );
 
-            // 3. Prepare photo info (excluding URL and final ID)
-             if (photoLocation) {
-                const photoInfo: Omit<Photo, 'url' | 'id'> = {
-                    location: photoLocation,
-                    description: photoDescription || '',
-                    waypointId: locationSource === 'waypoint' ? photoUploadWaypointContext?.id : undefined,
-                    locationSource: locationSource,
-                };
-
-                 // 4. Call the backend action to upload and save metadata
-                 try {
-                     const result = await uploadPhotoAction(dataUrl, savedRouteId, photoInfo);
-                     if (result.success && result.photoId && result.photoUrl) {
-                        // Add the *confirmed* photo metadata (with URL from backend) to local state
-                         setPhotos((prev) => [...prev, {
-                             id: result.photoId!,
-                             url: result.photoUrl!,
-                             ...photoInfo
-                         }]);
-                         photosAddedCount++;
-                     } else {
-                         throw new Error(result.error || "Unknown upload error");
-                     }
-                 } catch (uploadError: any) {
-                     console.error(`Failed to upload photo ${file.name}:`, uploadError);
-                     toast({ title: "Upload Failed", description: `Could not upload ${file.name}. ${uploadError.message}`, variant: "destructive" });
-                     photosFailedCount++;
-                 }
-
-             } else {
-                 // Should not happen if logic above is correct, but safeguard
-                 console.error(`Location could not be determined for ${file.name}, skipping.`);
-                 photosFailedCount++;
-             }
-        } // End of loop through files
-
-
-        // Final Toast Notification
-        let finalToastTitle = "Photo Upload Complete";
-        let finalToastDesc = "";
-        let finalToastVariant: "default" | "success" | "destructive" = "default";
-
-        if (photosAddedCount > 0 && photosFailedCount === 0) {
-            finalToastDesc = `${photosAddedCount} photo(s) uploaded successfully.`;
-            finalToastVariant = "success";
-        } else if (photosAddedCount > 0 && photosFailedCount > 0) {
-             finalToastDesc = `${photosAddedCount} photo(s) uploaded, ${photosFailedCount} failed.`;
-             finalToastVariant = "default"; // Or maybe warning?
-        } else if (photosAddedCount === 0 && photosFailedCount > 0) {
-             finalToastTitle = "Photo Upload Failed";
-             finalToastDesc = `All ${photosFailedCount} photo(s) failed to upload.`;
-             finalToastVariant = "destructive";
-        } else {
-            // No files processed? Should not happen normally.
-             finalToastTitle = "No Photos Processed";
-             finalToastDesc = "No photos were selected or processed.";
-        }
+        // Summarize results
+        const photosAddedCount = uploadResults.filter((res) => res.success).length;
+        const photosFailedCount = uploadResults.length - photosAddedCount;
 
         toast({
-            title: finalToastTitle,
-            description: finalToastDesc,
-            variant: finalToastVariant
+            title: photosAddedCount > 0 ? "Photo Upload Complete" : "Photo Upload Failed",
+            description: photosAddedCount > 0
+                ? `${photosAddedCount} photo(s) uploaded successfully. ${photosFailedCount > 0 ? `${photosFailedCount} failed.` : ''}`
+                : `All ${photosFailedCount} photo(s) failed to upload.`,
+            variant: photosFailedCount === 0 ? "success" : photosAddedCount > 0 ? "default" : "destructive",
         });
-
 
         // Clean up
         setIsUploadingPhotos(false);
@@ -798,8 +738,7 @@ export function RoutePlanner() {
         if (fileInputRef.current) {
             fileInputRef.current.value = ''; // Reset file input
         }
-
-    }, [toast, savedRouteId, photoUploadWaypointContext, photoDescription]); // Dependencies
+    }, [toast, savedRouteId, photoUploadWaypointContext, photoDescription]);
 
 
     // Removes a specific photo (from state and potentially backend)
