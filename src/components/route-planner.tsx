@@ -67,7 +67,13 @@ async function saveRouteAction(routeData: StoredRouteData): Promise<{ success: b
 
     } catch (error: any) {
         console.error("Error in saveRouteAction:", error);
-        return { success: false, error: error.message || "Failed to save route." };
+        const errorDetails = {
+            name: error.name || 'Unknown Error',
+            message: error.message || "Failed to save route.",
+            cause: error.cause || "No additional cause information available."
+        };
+
+        return { success: false, error: JSON.stringify(errorDetails, null, 2) };
     }
 }
 
@@ -812,7 +818,7 @@ export function RoutePlanner() {
             console.error("handleSaveRoute: Error saving route:", error);
             toast({
                 title: "Save Failed",
-                description: error.message || "Could not save the route. Please try again.",
+                description: `Could not save the route. Details: ${error.error}`,
                 variant: "destructive"
             });
              // Don't clear savedRouteId on failure if it was an update attempt

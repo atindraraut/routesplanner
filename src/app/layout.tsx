@@ -6,6 +6,7 @@ import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 import { Toaster } from '@/components/ui/toaster';
 import { Header } from '@/components/layout/header';
+import Providers from '@/components/providers';
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -44,14 +45,15 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
   return (
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        <APIProvider apiKey={apiKey} libraries={['marker', 'routes', 'places']}>
-          <div className="flex min-h-screen flex-col">
-            <Header />
-            <main className="flex-grow">{children}</main>
-            <Toaster />
-          </div>
-        </APIProvider>
+        <Providers>
+          <APIProvider apiKey={apiKey} libraries={['marker', 'routes', 'places']}>
+            <div className="flex min-h-screen flex-col">
+              <Header />
+              <main className="flex-grow">{children}</main>
+              <Toaster />
+            </div>
+          </APIProvider>
+        </Providers>
       </body>
     </html>
   );
-}
