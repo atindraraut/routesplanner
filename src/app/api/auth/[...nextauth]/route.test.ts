@@ -4,7 +4,7 @@ import { getServerSession } from 'next-auth'; // Correctly import getServerSessi
 import { NextRequest } from 'next/server';
 import { authOptions } from '@/lib/auth';
 import { handler } from './route'; // Correctly import handler
-
+import { GET } from './route';
 jest.mock('next-auth'); // Correct jest.mock call
 
 describe('Auth API Route', () => {
@@ -45,5 +45,20 @@ describe('Auth API Route', () => {
     await handler(mockRequest as NextApiRequest, mockResponse as NextApiResponse); // Correct call to handler
 
     expect(getServerSession).toHaveBeenCalledWith(mockRequest, mockResponse, authOptions); // Correct call to expect
+  });
+
+  test('should return 500 on internal server error', async () => {
+    // Mock getServerSession to throw an error
+    (getServerSession as jest.Mock).mockRejectedValue(new Error('Mock server error'));
+
+    const req = {
+      nextUrl: {
+        pathname: '/api/auth/session', // Simulate a session check request
+      },
+    } as unknown as NextRequest;
+
+    const res = await GET(req);
+
+    expect(res.status).toBe(500);
   });
 });
